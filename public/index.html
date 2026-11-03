@@ -306,8 +306,20 @@
             <h3 class="text-sm font-bold text-white">Agent Execution Logs</h3>
             <button onclick="loadAgentLogs()" class="text-xs text-slate-400 hover:text-white transition cursor-pointer">Refresh</button>
           </div>
-          <div id="agentLogsList" class="space-y-2 max-h-[300px] overflow-y-auto pr-2">
-            <!-- populated -->
+          <div class="flex flex-wrap gap-2 mb-3">
+            <select id="agentLogStatus" onchange="loadAgentLogs(1)" class="px-3 py-2 rounded-lg bg-slate-900 border border-white/10 text-slate-300 text-xs">
+              <option value="">All statuses</option><option value="success">Success</option><option value="failed">Failed</option><option value="discovered">Discovered</option>
+            </select>
+            <select id="agentLogAction" onchange="loadAgentLogs(1)" class="px-3 py-2 rounded-lg bg-slate-900 border border-white/10 text-slate-300 text-xs">
+              <option value="">All actions</option><option value="like">Like</option><option value="repost">Repost</option><option value="reply">Reply</option><option value="discover">Discover</option>
+            </select>
+            <span id="agentLogCount" class="ml-auto text-xs text-slate-500 self-center"></span>
+          </div>
+          <div id="agentLogsList" class="space-y-2 max-h-[300px] overflow-y-auto pr-2"><!-- populated --></div>
+          <div class="flex justify-between items-center mt-3">
+            <button id="agentLogPrev" onclick="loadAgentLogs(agentLogPage-1)" class="px-3 py-2 rounded-lg bg-white/5 text-slate-400 text-xs disabled:opacity-30">← Previous</button>
+            <span id="agentLogPageLabel" class="text-xs text-slate-500">Page 1</span>
+            <button id="agentLogNext" onclick="loadAgentLogs(agentLogPage+1)" class="px-3 py-2 rounded-lg bg-white/5 text-slate-400 text-xs disabled:opacity-30">Next →</button>
           </div>
         </div>
 
