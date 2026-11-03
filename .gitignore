@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.log
+*.err
+*.out
+npm-debug.log*
+.sessions
+coverage/
+.DS_Thumbs
