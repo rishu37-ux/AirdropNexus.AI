@@ -167,8 +167,478 @@ app.post('/api/agents/control',requireAuth,asyncRoute(async(req,res)=>{
  res.json({enabled:r.rows[0].enabled});
 }));
 app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
-  const r=await query('SELECT * FROM agent_executions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);
-  res.json({logs:r.rows});
+  const page=Math.max(1,parseInt(req.query.page,10)||1);
+  const limit=Math.min(50,Math.max(5,parseInt(req.query.limit,10)||20));
+  const offset=(page-1)*limit;
+  const status=['success','failed','discovered'].includes(req.query.status)?req.query.status:null;
+  const action=['like','repost','reply','discover'].includes(req.query.action)?req.query.action:null;
+  const params=[req.session.user.id];let where='user_id=$1';
+  if(status){params.push(status);where+=' AND status=
+async function runAgentsForUserUnlocked(uid){
+
+ const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
+ const cfg=cfgR.rows[0];
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return {status:400,error:'Enable at least one action in Agent settings.'};
+ if(cfg.auto_reply)return {status:400,error:'Auto-reply unavailable; turn it off to run Like/Repost.'};
+ const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ if(!targets.length)return {status:400,error:'Add enabled targets first.'};
+ const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return {status:409,error:'Connect your X account first.'};
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return {status:e.status||502,error:e.message,code:e.code||'X_TOKEN_ERROR'};}
+ const selfId=xAccount.rows[0].x_user_id, queries=[];
+ for(const t of targets){
+  let q='';
+  if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
+  else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
+  queries.push({target:t,query:q});
+ }
+ if(!queries.length)return {status:400,error:'Targets need valid X handles or hashtags.'};
+ const discovered=[],errors=[];
+ for(const item of queries.slice(0,8)){
+  try{
+   const url=new URL('https://api.x.com/2/tweets/search/recent');
+   url.searchParams.set('query',item.query+' -is:retweet -is:reply');
+   url.searchParams.set('max_results','10');
+   url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
+   const api=await fetchXWithRetry(url,{headers:{Authorization:'Bearer '+accessToken}},2);
+   const data=await api.json().catch(()=>({}));
+   if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
+   for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+  }catch{errors.push({target:item.query,message:'Network error querying X'});}
+ }
+ const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
+ let hourly=await query("SELECT count(*)::int n FROM agent_executions WHERE user_id=$1 AND status='success' AND action IN ('like','repost') AND created_at>now()-interval '1 hour'",[uid]);
+ let remaining=Math.max(0,Number(cfg.max_per_hour)-hourly.rows[0].n),executed=[],skipped=0;
+ for(const tweet of unique){
+  if(remaining<=0){skipped++;continue;}
+  for(const action of ['like','repost']){
+   if(action==='like'&&!cfg.auto_like||action==='repost'&&!cfg.auto_repost)continue;
+   if(remaining<=0){skipped++;break;}
+   const exists=await query("SELECT id FROM agent_executions WHERE user_id=$1 AND action=$2 AND target_post_id=$3 AND status='success'",[uid,action,tweet.id]);
+   if(exists.rowCount)continue;
+   const min=Math.max(1,Number(cfg.min_delay_sec)||1),max=Math.max(min,Number(cfg.max_delay_sec)||min);
+   if(executed.length)await new Promise(resolve=>setTimeout(resolve,(min+Math.floor(Math.random()*(max-min+1)))*1000));
+   let endpoint,body;
+   if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
+   else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
+   try{
+    const api=await fetchXWithRetry(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)},2);
+    const data=await api.json().catch(()=>({}));
+    if(api.ok){
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
+     executed.push({action,tweetId:tweet.id,target:tweet.target});remaining--;
+    }else{
+     const msg=data.detail||data.title||'X API rejected action';
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,String(msg).slice(0,500)]);
+     errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
+     if(api.status===401||api.status===403||api.status===429)break;
+    }
+   }catch(err){
+    const msg='Network error calling X action endpoint';
+    try{
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,msg]);
+    }catch(logErr){console.error('Could not persist failed agent execution',logErr);}
+    errors.push({action,tweetId:tweet.id,code:'NETWORK_ERROR',message:msg});
+   }
+  }
+ }
+ await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
+ return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
+
+}
+// Per-user session advisory lock: manual and scheduled runs cannot overlap for one account.
+async function runAgentsForUser(uid){
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked',['airdropnexus:user-agent:'+String(uid)]);
+  locked=lock.rows[0].locked;
+  if(!locked)return {status:409,error:'An agent cycle is already running for this account.',retryAfterSeconds:30};
+  return await runAgentsForUserUnlocked(uid);
+ }finally{
+  if(locked){try{await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))',['airdropnexus:user-agent:'+String(uid)]);}catch(e){console.error('User agent lock release failed',e);}}
+  lockClient.release();
+ }
+}
+app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
+// GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
+app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
+ const expected=process.env.SCHEDULER_SECRET||'';
+ const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
+ // A session-level advisory lock prevents overlapping cron/manual dispatches.
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query("SELECT pg_try_advisory_lock(hashtext('airdropnexus:global-agent-scheduler')) AS locked");
+  locked=lock.rows[0].locked;
+  if(!locked)return res.status(409).json({error:'Scheduler is already running',retryAfterSeconds:60});
+  const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+  const results=[];
+  for(const row of users){
+   try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+   catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+  }
+  res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0)});
+ }finally{
+  if(locked){try{await lockClient.query("SELECT pg_advisory_unlock(hashtext('airdropnexus:global-agent-scheduler'))");}catch(e){console.error('Scheduler lock release failed',e);}}
+  lockClient.release();
+ }
+}));
+app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
+const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
++params.length;}
+  if(action){params.push(action);where+=' AND action=
+async function runAgentsForUserUnlocked(uid){
+
+ const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
+ const cfg=cfgR.rows[0];
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return {status:400,error:'Enable at least one action in Agent settings.'};
+ if(cfg.auto_reply)return {status:400,error:'Auto-reply unavailable; turn it off to run Like/Repost.'};
+ const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ if(!targets.length)return {status:400,error:'Add enabled targets first.'};
+ const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return {status:409,error:'Connect your X account first.'};
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return {status:e.status||502,error:e.message,code:e.code||'X_TOKEN_ERROR'};}
+ const selfId=xAccount.rows[0].x_user_id, queries=[];
+ for(const t of targets){
+  let q='';
+  if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
+  else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
+  queries.push({target:t,query:q});
+ }
+ if(!queries.length)return {status:400,error:'Targets need valid X handles or hashtags.'};
+ const discovered=[],errors=[];
+ for(const item of queries.slice(0,8)){
+  try{
+   const url=new URL('https://api.x.com/2/tweets/search/recent');
+   url.searchParams.set('query',item.query+' -is:retweet -is:reply');
+   url.searchParams.set('max_results','10');
+   url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
+   const api=await fetchXWithRetry(url,{headers:{Authorization:'Bearer '+accessToken}},2);
+   const data=await api.json().catch(()=>({}));
+   if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
+   for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+  }catch{errors.push({target:item.query,message:'Network error querying X'});}
+ }
+ const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
+ let hourly=await query("SELECT count(*)::int n FROM agent_executions WHERE user_id=$1 AND status='success' AND action IN ('like','repost') AND created_at>now()-interval '1 hour'",[uid]);
+ let remaining=Math.max(0,Number(cfg.max_per_hour)-hourly.rows[0].n),executed=[],skipped=0;
+ for(const tweet of unique){
+  if(remaining<=0){skipped++;continue;}
+  for(const action of ['like','repost']){
+   if(action==='like'&&!cfg.auto_like||action==='repost'&&!cfg.auto_repost)continue;
+   if(remaining<=0){skipped++;break;}
+   const exists=await query("SELECT id FROM agent_executions WHERE user_id=$1 AND action=$2 AND target_post_id=$3 AND status='success'",[uid,action,tweet.id]);
+   if(exists.rowCount)continue;
+   const min=Math.max(1,Number(cfg.min_delay_sec)||1),max=Math.max(min,Number(cfg.max_delay_sec)||min);
+   if(executed.length)await new Promise(resolve=>setTimeout(resolve,(min+Math.floor(Math.random()*(max-min+1)))*1000));
+   let endpoint,body;
+   if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
+   else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
+   try{
+    const api=await fetchXWithRetry(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)},2);
+    const data=await api.json().catch(()=>({}));
+    if(api.ok){
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
+     executed.push({action,tweetId:tweet.id,target:tweet.target});remaining--;
+    }else{
+     const msg=data.detail||data.title||'X API rejected action';
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,String(msg).slice(0,500)]);
+     errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
+     if(api.status===401||api.status===403||api.status===429)break;
+    }
+   }catch(err){
+    const msg='Network error calling X action endpoint';
+    try{
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,msg]);
+    }catch(logErr){console.error('Could not persist failed agent execution',logErr);}
+    errors.push({action,tweetId:tweet.id,code:'NETWORK_ERROR',message:msg});
+   }
+  }
+ }
+ await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
+ return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
+
+}
+// Per-user session advisory lock: manual and scheduled runs cannot overlap for one account.
+async function runAgentsForUser(uid){
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked',['airdropnexus:user-agent:'+String(uid)]);
+  locked=lock.rows[0].locked;
+  if(!locked)return {status:409,error:'An agent cycle is already running for this account.',retryAfterSeconds:30};
+  return await runAgentsForUserUnlocked(uid);
+ }finally{
+  if(locked){try{await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))',['airdropnexus:user-agent:'+String(uid)]);}catch(e){console.error('User agent lock release failed',e);}}
+  lockClient.release();
+ }
+}
+app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
+// GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
+app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
+ const expected=process.env.SCHEDULER_SECRET||'';
+ const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
+ // A session-level advisory lock prevents overlapping cron/manual dispatches.
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query("SELECT pg_try_advisory_lock(hashtext('airdropnexus:global-agent-scheduler')) AS locked");
+  locked=lock.rows[0].locked;
+  if(!locked)return res.status(409).json({error:'Scheduler is already running',retryAfterSeconds:60});
+  const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+  const results=[];
+  for(const row of users){
+   try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+   catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+  }
+  res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0)});
+ }finally{
+  if(locked){try{await lockClient.query("SELECT pg_advisory_unlock(hashtext('airdropnexus:global-agent-scheduler'))");}catch(e){console.error('Scheduler lock release failed',e);}}
+  lockClient.release();
+ }
+}));
+app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
+const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
++params.length;}
+  const count=await query('SELECT count(*)::int total FROM agent_executions WHERE '+where,params);
+  params.push(limit,offset);
+  const rows=await query('SELECT id,action,status,message,created_at,target_post_id,target_account,chain,wallet_address FROM agent_executions WHERE '+where+' ORDER BY created_at DESC LIMIT 
+async function runAgentsForUserUnlocked(uid){
+
+ const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
+ const cfg=cfgR.rows[0];
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return {status:400,error:'Enable at least one action in Agent settings.'};
+ if(cfg.auto_reply)return {status:400,error:'Auto-reply unavailable; turn it off to run Like/Repost.'};
+ const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ if(!targets.length)return {status:400,error:'Add enabled targets first.'};
+ const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return {status:409,error:'Connect your X account first.'};
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return {status:e.status||502,error:e.message,code:e.code||'X_TOKEN_ERROR'};}
+ const selfId=xAccount.rows[0].x_user_id, queries=[];
+ for(const t of targets){
+  let q='';
+  if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
+  else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
+  queries.push({target:t,query:q});
+ }
+ if(!queries.length)return {status:400,error:'Targets need valid X handles or hashtags.'};
+ const discovered=[],errors=[];
+ for(const item of queries.slice(0,8)){
+  try{
+   const url=new URL('https://api.x.com/2/tweets/search/recent');
+   url.searchParams.set('query',item.query+' -is:retweet -is:reply');
+   url.searchParams.set('max_results','10');
+   url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
+   const api=await fetchXWithRetry(url,{headers:{Authorization:'Bearer '+accessToken}},2);
+   const data=await api.json().catch(()=>({}));
+   if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
+   for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+  }catch{errors.push({target:item.query,message:'Network error querying X'});}
+ }
+ const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
+ let hourly=await query("SELECT count(*)::int n FROM agent_executions WHERE user_id=$1 AND status='success' AND action IN ('like','repost') AND created_at>now()-interval '1 hour'",[uid]);
+ let remaining=Math.max(0,Number(cfg.max_per_hour)-hourly.rows[0].n),executed=[],skipped=0;
+ for(const tweet of unique){
+  if(remaining<=0){skipped++;continue;}
+  for(const action of ['like','repost']){
+   if(action==='like'&&!cfg.auto_like||action==='repost'&&!cfg.auto_repost)continue;
+   if(remaining<=0){skipped++;break;}
+   const exists=await query("SELECT id FROM agent_executions WHERE user_id=$1 AND action=$2 AND target_post_id=$3 AND status='success'",[uid,action,tweet.id]);
+   if(exists.rowCount)continue;
+   const min=Math.max(1,Number(cfg.min_delay_sec)||1),max=Math.max(min,Number(cfg.max_delay_sec)||min);
+   if(executed.length)await new Promise(resolve=>setTimeout(resolve,(min+Math.floor(Math.random()*(max-min+1)))*1000));
+   let endpoint,body;
+   if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
+   else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
+   try{
+    const api=await fetchXWithRetry(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)},2);
+    const data=await api.json().catch(()=>({}));
+    if(api.ok){
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
+     executed.push({action,tweetId:tweet.id,target:tweet.target});remaining--;
+    }else{
+     const msg=data.detail||data.title||'X API rejected action';
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,String(msg).slice(0,500)]);
+     errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
+     if(api.status===401||api.status===403||api.status===429)break;
+    }
+   }catch(err){
+    const msg='Network error calling X action endpoint';
+    try{
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,msg]);
+    }catch(logErr){console.error('Could not persist failed agent execution',logErr);}
+    errors.push({action,tweetId:tweet.id,code:'NETWORK_ERROR',message:msg});
+   }
+  }
+ }
+ await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
+ return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
+
+}
+// Per-user session advisory lock: manual and scheduled runs cannot overlap for one account.
+async function runAgentsForUser(uid){
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked',['airdropnexus:user-agent:'+String(uid)]);
+  locked=lock.rows[0].locked;
+  if(!locked)return {status:409,error:'An agent cycle is already running for this account.',retryAfterSeconds:30};
+  return await runAgentsForUserUnlocked(uid);
+ }finally{
+  if(locked){try{await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))',['airdropnexus:user-agent:'+String(uid)]);}catch(e){console.error('User agent lock release failed',e);}}
+  lockClient.release();
+ }
+}
+app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
+// GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
+app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
+ const expected=process.env.SCHEDULER_SECRET||'';
+ const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
+ // A session-level advisory lock prevents overlapping cron/manual dispatches.
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query("SELECT pg_try_advisory_lock(hashtext('airdropnexus:global-agent-scheduler')) AS locked");
+  locked=lock.rows[0].locked;
+  if(!locked)return res.status(409).json({error:'Scheduler is already running',retryAfterSeconds:60});
+  const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+  const results=[];
+  for(const row of users){
+   try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+   catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+  }
+  res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0)});
+ }finally{
+  if(locked){try{await lockClient.query("SELECT pg_advisory_unlock(hashtext('airdropnexus:global-agent-scheduler'))");}catch(e){console.error('Scheduler lock release failed',e);}}
+  lockClient.release();
+ }
+}));
+app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
+const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
++(params.length-1)+' OFFSET 
+async function runAgentsForUserUnlocked(uid){
+
+ const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
+ const cfg=cfgR.rows[0];
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return {status:400,error:'Enable at least one action in Agent settings.'};
+ if(cfg.auto_reply)return {status:400,error:'Auto-reply unavailable; turn it off to run Like/Repost.'};
+ const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ if(!targets.length)return {status:400,error:'Add enabled targets first.'};
+ const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return {status:409,error:'Connect your X account first.'};
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return {status:e.status||502,error:e.message,code:e.code||'X_TOKEN_ERROR'};}
+ const selfId=xAccount.rows[0].x_user_id, queries=[];
+ for(const t of targets){
+  let q='';
+  if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
+  else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
+  queries.push({target:t,query:q});
+ }
+ if(!queries.length)return {status:400,error:'Targets need valid X handles or hashtags.'};
+ const discovered=[],errors=[];
+ for(const item of queries.slice(0,8)){
+  try{
+   const url=new URL('https://api.x.com/2/tweets/search/recent');
+   url.searchParams.set('query',item.query+' -is:retweet -is:reply');
+   url.searchParams.set('max_results','10');
+   url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
+   const api=await fetchXWithRetry(url,{headers:{Authorization:'Bearer '+accessToken}},2);
+   const data=await api.json().catch(()=>({}));
+   if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
+   for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+  }catch{errors.push({target:item.query,message:'Network error querying X'});}
+ }
+ const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
+ let hourly=await query("SELECT count(*)::int n FROM agent_executions WHERE user_id=$1 AND status='success' AND action IN ('like','repost') AND created_at>now()-interval '1 hour'",[uid]);
+ let remaining=Math.max(0,Number(cfg.max_per_hour)-hourly.rows[0].n),executed=[],skipped=0;
+ for(const tweet of unique){
+  if(remaining<=0){skipped++;continue;}
+  for(const action of ['like','repost']){
+   if(action==='like'&&!cfg.auto_like||action==='repost'&&!cfg.auto_repost)continue;
+   if(remaining<=0){skipped++;break;}
+   const exists=await query("SELECT id FROM agent_executions WHERE user_id=$1 AND action=$2 AND target_post_id=$3 AND status='success'",[uid,action,tweet.id]);
+   if(exists.rowCount)continue;
+   const min=Math.max(1,Number(cfg.min_delay_sec)||1),max=Math.max(min,Number(cfg.max_delay_sec)||min);
+   if(executed.length)await new Promise(resolve=>setTimeout(resolve,(min+Math.floor(Math.random()*(max-min+1)))*1000));
+   let endpoint,body;
+   if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
+   else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
+   try{
+    const api=await fetchXWithRetry(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)},2);
+    const data=await api.json().catch(()=>({}));
+    if(api.ok){
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
+     executed.push({action,tweetId:tweet.id,target:tweet.target});remaining--;
+    }else{
+     const msg=data.detail||data.title||'X API rejected action';
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,String(msg).slice(0,500)]);
+     errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
+     if(api.status===401||api.status===403||api.status===429)break;
+    }
+   }catch(err){
+    const msg='Network error calling X action endpoint';
+    try{
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,msg]);
+    }catch(logErr){console.error('Could not persist failed agent execution',logErr);}
+    errors.push({action,tweetId:tweet.id,code:'NETWORK_ERROR',message:msg});
+   }
+  }
+ }
+ await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
+ return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
+
+}
+// Per-user session advisory lock: manual and scheduled runs cannot overlap for one account.
+async function runAgentsForUser(uid){
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked',['airdropnexus:user-agent:'+String(uid)]);
+  locked=lock.rows[0].locked;
+  if(!locked)return {status:409,error:'An agent cycle is already running for this account.',retryAfterSeconds:30};
+  return await runAgentsForUserUnlocked(uid);
+ }finally{
+  if(locked){try{await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))',['airdropnexus:user-agent:'+String(uid)]);}catch(e){console.error('User agent lock release failed',e);}}
+  lockClient.release();
+ }
+}
+app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
+// GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
+app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
+ const expected=process.env.SCHEDULER_SECRET||'';
+ const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
+ // A session-level advisory lock prevents overlapping cron/manual dispatches.
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query("SELECT pg_try_advisory_lock(hashtext('airdropnexus:global-agent-scheduler')) AS locked");
+  locked=lock.rows[0].locked;
+  if(!locked)return res.status(409).json({error:'Scheduler is already running',retryAfterSeconds:60});
+  const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+  const results=[];
+  for(const row of users){
+   try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+   catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+  }
+  res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0)});
+ }finally{
+  if(locked){try{await lockClient.query("SELECT pg_advisory_unlock(hashtext('airdropnexus:global-agent-scheduler'))");}catch(e){console.error('Scheduler lock release failed',e);}}
+  lockClient.release();
+ }
+}));
+app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
+const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
++params.length,params);
+  res.json({logs:rows.rows,total:count.rows[0].total,page,limit,totalPages:Math.max(1,Math.ceil(count.rows[0].total/limit))});
 }));
 async function runAgentsForUserUnlocked(uid){
 
