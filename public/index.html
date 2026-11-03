@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AirdropNexus AI — Crypto Airdrop Intelligence</title>
+  <meta name="description" content="Personal Crypto Airdrop Opportunity Intelligence and X Campaign Monitoring dashboard">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <style>/* Critical inline styles to avoid FOUC */:root{--color-bg:#0f172a;--color-surface:#1e293b;--color-text:#f8fafc;--color-muted:#94a3b8;--color-accent:#38bdf8;--color-danger:#ef4444;--color-success:#22c55e;--color-warning:#f59e0b;--radius:12px;--shadow:0 10px 30px -10px rgba(0,0,0,0.5)}*{box-sizing:border-box;margin:0;padding:0}html{scroll-behavior:smooth}body{font-family:'Inter',system-ui,sans-serif;background:var(--color-bg);color:var(--color-text);line-height:1.5}img{max-width:100%;display:block}a{color:var(--color-accent);text-decoration:none}button{cursor:pointer;font:inherit;background:none;border:none;color:inherit}</style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div class="brand-text">AirdropNexus<span class="brand-accent">.AI</span></div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-section="overview" title="Overview Dashboard"><span class="nav-icon">📊</span><span>Overview</span></button>
+        <button class="nav-item" data-section="agent-center" title="Agent Center"><span class="nav-icon">🤖</span><span>Agent Center</span></button>
+        <button class="nav-item" data-section="campaigns" title="Campaign Explorer"><span class="nav-icon">🔍</span><span>Campaigns</span></button>
+        <button class="nav-item" data-section="x-integration" title="X Integration"><span class="nav-icon">🐦</span><span>X (Twitter)</span></button>
+        <button class="nav-item" data-section="wallets" title="Wallet Manager"><span class="nav-icon">💼</span><span>Wallets</span></button>
+        <button class="nav-item" data-section="ai-models" title="AI Model Manager"><span class="nav-icon">🧠</span><span>AI Models</span></button>
+        <button class="nav-item" data-section="scheduler" title="Run Engine / Scheduler"><span class="nav-icon">⏱️</span><span>Scheduler</span></button>
+        <button class="nav-item" data-section="logs" title="Activity Logs"><span class="nav-icon">📜</span><span>Logs</span></button>
+        <button class="nav-item" data-section="reports" title="Daily Reports"><span class="nav-icon">📄</span><span>Reports</span></button>
+        <button class="nav-item" data-section="settings" title="Settings / Security"><span class="nav-icon">⚙️</span><span>Settings</span></button>
+        <button class="nav-item" data-section="health" title="Deployment Health"><span class="nav-icon">🏥</span><span>Health</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="nav-item theme-toggle" id="themeToggle" title="Toggle theme"><span class="nav-icon">🌓</span><span>Theme</span></button>
+        <button class="nav-item logout-btn" id="logoutBtn" title="Logout"><span class="nav-icon">🚪</span><span>Logout</span></button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <header class="topbar">
+        <button class="menu-toggle" id="menuToggle" aria-label="Toggle navigation">☰</button>
+        <div class="topbar-center">
+          <h1 id="pageTitle">Overview Dashboard</h1>
+          <p id="pageSubtitle">Control center for crypto airdrop intelligence</p>
+        </div>
+        <div class="topbar-right">
+          <span class="status-chip" id="workerStatus" title="Worker status">● idle</span>
+          <button class="btn btn-primary" id="demoLoginBtn">Demo Login</button>
+        </div>
+      </header>
+
+      <!-- Toast container -->
+      <div class="toast-container" id="toastContainer"></div>
+
+      <!-- Sections -->
+      <section class="panel" id="section-overview">
+        <div class="panel-header">
+          <h2>Overview</h2>
+          <div class="panel-actions">
+            <button class="btn btn-outline btn-sm" id="refreshOverview">Refresh</button>
+            <button class="btn btn-outline btn-sm" id="startWorkerBtn">Start Worker</button>
+            <button class="btn btn-outline btn-sm" id="stopWorkerBtn">Stop Worker</button>
+          </div>
+        </div>
+        <div class="metrics-grid">
+          <div class="metric-card"><div class="metric-label">Agent Status</div><div class="metric-value" id="metricAgentStatus">—</div><div class="metric-sub">Master orchestrator</div></div>
+          <div class="metric-card"><div class="metric-label">X Connection</div><div class="metric-value" id="metricXStatus">—</div><div class="metric-sub">OAuth 2.0</div></div>
+          <div class="metric-card"><div class="metric-label">AI Provider</div><div class="metric-value" id="metricAIStatus">—</div><div class="metric-sub">Rule-based fallback</div></div>
+          <div class="metric-card"><div class="metric-label">Wallets</div><div class="metric-value" id="metricWallets">0</div><div class="metric-sub">Public addresses</div></div>
+          <div class="metric-card"><div class="metric-label">Campaigns Today</div><div class="metric-value" id="metricCampaigns">0</div><div class="metric-sub">Discovered</div></div>
+          <div class="metric-card"><div class="metric-label">Awaiting Review</div><div class="metric-value" id="metricAwaiting">0</div><div class="metric-sub">New opportunities</div></div>
+          <div class="metric-card"><div class="metric-label">Processed Posts</div><div class="metric-value" id="metricPosts">0</div><div class="metric-sub">Scanned</div></div>
+          <div class="metric-card"><div class="metric-label">Worker Heartbeat</div><div class="metric-value" id="metricHeartbeat">—</div><div class="metric-sub">Last run</div></div>
+        </div>
+        <div class="panel-grid">
+          <div class="card half">
+            <div class="card-header"><h3>Recent Activity</h3></div>
+            <div class="card-body" id="activityFeed">
+              <div class="empty-state"><p>No activity yet. Start the worker or run an agent manually.</p></div>
+            </div>
+          </div>
+          <div class="card half">
+            <div class="card-header"><h3>Campaigns by Status</h3></div>
+            <div class="card-body" id="statusChart">
+              <div class="chart-placeholder">Chart renders when data is available</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-agent-center">
+        <div class="panel-header">
+          <h2>Agent Center</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="runAllAgentsBtn">Run All</button>
+            <button class="btn btn-outline btn-sm" id="refreshAgentsBtn">Refresh</button>
+          </div>
+        </div>
+        <div class="card full">
+          <div class="card-body">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Agent</th><th>Role</th><th>Provider/Model</th><th>Schedule</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Success</th><th>Failed</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="agentsTableBody">
+                  <tr><td colspan="10" class="empty-state">Loading agents...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-campaigns">
+        <div class="panel-header">
+          <h2>Campaign Explorer</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="exportCampaignsBtn">Export CSV</button>
+            <button class="btn btn-outline btn-sm" id="refreshCampaignsBtn">Refresh</button>
+          </div>
+        </div>
+        <div class="card full">
+          <div class="card-body">
+            <div class="filters">
+              <input type="text" id="campaignSearch" placeholder="Search campaigns...">
+              <select id="campaignStatusFilter"><option value="">All statuses</option><option>New</option><option>Relevant</option><option>Ignored</option><option>Watchlist</option><option>Completed</option><option>Scam/Suspicious</option></select>
+              <input type="text" id="campaignChainFilter" placeholder="Chain (e.g. Solana)">
+            </div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Campaign</th><th>Author</th><th>Chains/Tickers</th><th>Confidence</th><th>Status</th><th>Risk</th><th>Source</th><th>Date</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="campaignsTableBody">
+                  <tr><td colspan="9" class="empty-state">Loading campaigns...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-x-integration">
+        <div class="panel-header">
+          <h2>X (Twitter) Integration</h2>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Connection</h3></div>
+          <div class="card-body" id="xConnectionBody">
+            <div class="empty-state"><p>Loading connection status...</p></div>
+          </div>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Setup</h3></div>
+          <div class="card-body">
+            <p class="muted">Official X OAuth 2.0 only. No passwords collected.</p>
+            <div class="muted small">1. Create an X Developer App at developer.x.com<br>2. Set callback URL to <code id="xCallbackUrl"></code><br>3. Add X_CLIENT_ID, X_CLIENT_SECRET, X_CALLBACK_URL to .env<br>4. Click Connect X below</div>
+            <button class="btn btn-outline" id="connectXBtn" disabled>Connect X</button>
+            <button class="btn btn-outline" id="disconnectXBtn" style="display:none">Disconnect X</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-wallets">
+        <div class="panel-header">
+          <h2>Wallet Manager</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="addWalletBtn">Add Wallet</button>
+            <button class="btn btn-outline btn-sm" id="exportWalletsBtn">Export CSV</button>
+          </div>
+        </div>
+        <div class="card full">
+          <div class="card-body">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Label</th><th>Network</th><th>Ticker</th><th>Address</th><th>Enabled</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="walletsTableBody">
+                  <tr><td colspan="6" class="empty-state">Loading wallets...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="card full hidden" id="addWalletCard">
+          <div class="card-body">
+            <h3>Add Wallet</h3>
+            <form id="walletForm">
+              <div class="form-row">
+                <div class="form-group"><label>Label</label><input type="text" name="label" required placeholder="e.g. My Solana Wallet"></div>
+                <div class="form-group"><label>Network</label><select name="network" required><option value="Solana">Solana</option><option value="Ethereum">Ethereum</option><option value="Bitcoin">Bitcoin</option><option value="Polygon">Polygon</option><option value="TON">TON</option><option value="Monad">Monad</option><option value="Base">Base</option><option value="Arbitrum">Arbitrum</option><option value="Optimism">Optimism</option><option value="BNB Chain">BNB Chain</option><option value="Custom">Custom</option></select></div>
+              </div>
+              <div class="form-row">
+                <div class="form-group"><label>Ticker</label><input type="text" name="ticker" placeholder="e.g. SOL"></div>
+                <div class="form-group"><label>Public Address</label><input type="text" name="public_address" required placeholder="Paste public address only"></div>
+              </div>
+              <div class="form-group"><label>Notes (optional)</label><textarea name="notes" rows="2" placeholder="Optional notes"></textarea></div>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Save Wallet</button>
+                <button type="button" class="btn btn-outline" id="cancelWalletBtn">Cancel</button>
+              </div>
+            </form>
+            <div id="walletValidationMsg" class="muted small"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-ai-models">
+        <div class="panel-header">
+          <h2>AI Model Manager</h2>
+        </div>
+        <div class="card full">
+          <div class="card-header"><h3>Provider Catalog</h3></div>
+          <div class="card-body" id="aiCatalogBody">
+            <div class="empty-state">Loading provider catalog...</div>
+          </div>
+        </div>
+        <div class="card full hidden" id="addAIConfigCard">
+          <div class="card-body">
+            <h3>Add AI Provider</h3>
+            <form id="aiConfigForm">
+              <div class="form-group"><label>Provider</label><select name="provider" id="aiProviderSelect" required></select></div>
+              <div class="form-group"><label>Model</label><input type="text" name="model" placeholder="e.g. gemini-1.5-flash"></div>
+              <div class="form-group"><label>Base URL (optional)</label><input type="text" name="baseUrl" placeholder="https://api.example.com"></div>
+              <div class="form-group"><label>API Key</label><input type="password" name="apiKey" required placeholder="Enter provider API key"></div>
+              <label class="checkbox-label"><input type="checkbox" name="isDefault"> Set as default</label>
+              <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Save Provider</button>
+                <button type="button" class="btn btn-outline" id="cancelAIConfigBtn">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-scheduler">
+        <div class="panel-header">
+          <h2>Run Engine / Scheduler</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="pauseWorkerBtn">Pause</button>
+            <button class="btn btn-outline btn-sm" id="resumeWorkerBtn">Resume</button>
+          </div>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Worker Status</h3></div>
+          <div class="card-body">
+            <div class="stat-row"><span>Mode</span><span id="workerModeVal">—</span></div>
+            <div class="stat-row"><span>Enabled</span><span id="workerEnabledVal">—</span></div>
+            <div class="stat-row"><span>Interval</span><span id="workerIntervalVal">— min</span></div>
+            <div class="stat-row"><span>Last Heartbeat</span><span id="workerHeartbeatVal">—</span></div>
+            <div class="stat-row"><span>Next Scheduled Run</span><span id="workerNextRunVal">—</span></div>
+          </div>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Recent Jobs</h3></div>
+          <div class="card-body" id="recentJobsBody">
+            <div class="empty-state">No jobs yet.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-logs">
+        <div class="panel-header">
+          <h2>Activity Logs</h2>
+        </div>
+        <div class="card full">
+          <div class="card-body" id="logsBody">
+            <div class="empty-state">Loading logs...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-reports">
+        <div class="panel-header">
+          <h2>Daily Reports</h2>
+          <div class="panel-actions">
+            <button class="btn btn-primary btn-sm" id="generateReportBtn">Generate Today</button>
+            <button class="btn btn-outline btn-sm" id="refreshReportsBtn">Refresh</button>
+          </div>
+        </div>
+        <div class="card full">
+          <div class="card-body" id="reportsBody">
+            <div class="empty-state">No reports yet. Generate today's report.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-settings">
+        <div class="panel-header">
+          <h2>Settings / Security</h2>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Preferences</h3></div>
+          <div class="card-body">
+            <div class="form-group"><label>Theme</label><select id="settingTheme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+            <div class="form-group"><label>Timezone</label><select id="settingTimezone"><option value="Asia/Kolkata">Asia/Kolkata</option><option value="UTC">UTC</option></select></div>
+            <div class="form-group"><label>Daily Report Time</label><input type="time" id="settingReportTime" value="09:00"></div>
+            <label class="checkbox-label"><input type="checkbox" id="settingDailyReport"> Enable daily email report</div>
+            <div class="form-actions"><button class="btn btn-primary" id="saveSettingsBtn">Save Settings</button></div>
+          </div>
+        </div>
+        <div class="card half">
+          <div class="card-header"><h3>Export / Backup</h3></div>
+          <div class="card-body">
+            <p class="muted small">Export all data as JSON for backup. Restore guidance in docs/deployment.md.</p>
+            <button class="btn btn-outline" id="exportDataBtn">Export Data (JSON)</button>
+          </div>
+        </div>
+        <div class="card full">
+          <div class="card-header"><h3>Security Notice</h3></div>
+          <div class="card-body">
+            <div class="alert alert-warning">
+              <strong>Public wallet addresses are public information.</strong> However, associating them with a user account may still be sensitive. Never store private keys, seed phrases, or signing secrets in this app.
+            </div>
+            <div class="alert alert-info">
+              <strong>Demo mode:</strong> Labeled sample data is present until you configure live integrations (X API, AI provider, SMTP).
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="section-health">
+        <div class="panel-header">
+          <h2>Deployment & System Health</h2>
+        </div>
+        <div class="card full">
+          <div class="card-body" id="healthBody">
+            <div class="empty-state">Loading health...</div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

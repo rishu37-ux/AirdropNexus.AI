@@ -1,0 +1,45 @@
+{
+  "name": "airdropnexus-ai",
+  "version": "1.0.0",
+  "description": "AirdropNexus AI — Crypto Airdrop Opportunity Intelligence and X Campaign Monitoring dashboard",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js",
+    "migrate": "node src/database/migrate.js",
+    "seed": "node src/database/seed.js",
+    "test": "node --test tests/**/*.test.js",
+    "lint": "echo \"Lint not configured yet\""
+  },
+  "keywords": [
+    "airdrop",
+    "crypto",
+    "x-api",
+    "twitter",
+    "dashboard",
+    "ai",
+    "wallet",
+    "express",
+    "sqlite"
+  ],
+  "author": "AirdropNexus AI",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "express-session": "^1.18.0",
+    "express-validator": "^7.1.0",
+    "helmet": "^7.1.0",
+    "node-fetch": "^3.3.2",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.0",
+    "sql.js": "^1.10.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {}
+}
