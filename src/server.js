@@ -61,8 +61,7 @@ async function getValidXAccessToken(userId){
   await client.query('UPDATE x_oauth_tokens SET access_token=$2,refresh_token=COALESCE($3,refresh_token),expires_at=$4,updated_at=now() WHERE user_id=$1',[userId,data.access_token,data.refresh_token||null,expiresAt]);
   await client.query('COMMIT');
   return data.access_token;
- }catch(e){try{await client.query('ROLLBACK')}catch{};throw e;}
- }finally{client.release();}
+ }catch(e){try{await client.query('ROLLBACK');}catch(rollbackError){} throw e;} finally {client.release();}
 }
 
 // X OAuth 2.0 PKCE: requires credentials configured in .env and matching developer portal callback.
