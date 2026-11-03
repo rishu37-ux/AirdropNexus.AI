@@ -230,8 +230,12 @@ async function runAgentsForUserUnlocked(uid){
      errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
      if(api.status===401||api.status===403||api.status===429)break;
     }
-   }catch{
-    errors.push({action,tweetId:tweet.id,message:'Network error calling X action endpoint'});
+   }catch(err){
+    const msg='Network error calling X action endpoint';
+    try{
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,msg]);
+    }catch(logErr){console.error('Could not persist failed agent execution',logErr);}
+    errors.push({action,tweetId:tweet.id,code:'NETWORK_ERROR',message:msg});
    }
   }
  }
