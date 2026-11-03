@@ -311,6 +311,37 @@
           </div>
         </div>
 
+        <!-- Agent Monitoring -->
+        <div class="glass rounded-2xl p-6 border border-white/5">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
+            <div>
+              <h3 class="text-sm font-bold text-white">Agent Monitoring Center</h3>
+              <p class="text-[11px] text-slate-500">Live account-level execution telemetry · last 24 hours</p>
+            </div>
+            <div class="flex gap-2">
+              <button id="btnAgentMonitorRefresh" onclick="loadAgentMonitoring()" class="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-slate-300 text-xs hover:bg-white/10">Refresh</button>
+              <button id="btnAgentPauseResume" onclick="controlAgents()" class="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-semibold">Pause All</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+            <div class="rounded-xl bg-white/5 border border-white/5 p-4"><p class="text-[10px] text-slate-500 uppercase font-semibold">Confirmed actions</p><p id="monSucceeded" class="text-2xl font-mono font-bold text-emerald-300 mt-1">—</p></div>
+            <div class="rounded-xl bg-white/5 border border-white/5 p-4"><p class="text-[10px] text-slate-500 uppercase font-semibold">Failed actions</p><p id="monFailed" class="text-2xl font-mono font-bold text-rose-300 mt-1">—</p></div>
+            <div class="rounded-xl bg-white/5 border border-white/5 p-4"><p class="text-[10px] text-slate-500 uppercase font-semibold">Posts discovered</p><p id="monDiscovered" class="text-2xl font-mono font-bold text-cyan-300 mt-1">—</p></div>
+            <div class="rounded-xl bg-white/5 border border-white/5 p-4"><p class="text-[10px] text-slate-500 uppercase font-semibold">Actions · 24h</p><p id="mon24h" class="text-2xl font-mono font-bold text-white mt-1">—</p></div>
+          </div>
+          <div class="flex flex-wrap items-center gap-3 text-xs text-slate-400 mb-4">
+            <span>Last activity: <strong id="monLastActivity" class="text-slate-200">—</strong></span>
+            <span class="px-2 py-1 rounded bg-white/5 border border-white/10">Like: <strong id="monLike">OFF</strong></span>
+            <span class="px-2 py-1 rounded bg-white/5 border border-white/10">Repost: <strong id="monRepost">OFF</strong></span>
+            <span class="px-2 py-1 rounded bg-white/5 border border-white/10">Reply: <strong id="monReply">OFF</strong></span>
+            <span class="px-2 py-1 rounded bg-white/5 border border-white/10">Hourly cap: <strong id="monCap">20</strong></span>
+          </div>
+          <div>
+            <h4 class="text-xs font-bold text-slate-300 mb-2">Latest agent events</h4>
+            <div id="monRecent" class="space-y-2"><p class="text-xs text-slate-500">Loading monitoring data…</p></div>
+          </div>
+        </div>
+
         <!-- Publish Post (existing) -->
         <div class="glass rounded-2xl p-6 border border-white/5">
           <h3 class="text-sm font-bold text-white mb-4">Publish Manual Post</h3>
