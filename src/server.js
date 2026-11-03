@@ -3,8 +3,8 @@ const express=require('express'), session=require('express-session'), PgSession=
 const {pool,query}=require('./db');
 const app=express();
 if(!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length<32) console.warn('WARNING: Set SESSION_SECRET to a random secret of 32+ chars.');
-app.set('trust proxy',1); app.use(helmet({contentSecurityPolicy:false})); app.use(express.json({limit:'100kb'})); app.use(cookieParser());
-app.use(session({store:new PgSession({pool,tableName:'session'}),secret:process.env.SESSION_SECRET||'unsafe-dev-secret-change-me',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.COOKIE_SECURE==='true',maxAge:7*24*60*60*1000}}));
+app.set('trust proxy',process.env.TRUST_PROXY==='true' ? 1 : false); app.use(helmet({contentSecurityPolicy:false})); app.use(express.json({limit:'100kb'})); app.use(cookieParser());
+app.use(session({store:new PgSession({pool,tableName:'session'}),secret:process.env.SESSION_SECRET,resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:process.env.COOKIE_SECURE==='true',maxAge:7*24*60*60*1000}}));
 app.use(express.static(require('path').join(__dirname,'../public')));
 const limiter=rateLimit({windowMs:15*60*1000,max:100,standardHeaders:true,legacyHeaders:false}); app.use('/api',limiter);
 const authLimiter=rateLimit({windowMs:15*60*1000,max:10,standardHeaders:true,legacyHeaders:false});
@@ -16,14 +16,14 @@ app.post('/api/auth/register',authLimiter,asyncRoute(async(req,res)=>{
  const body=z.object({email:z.string().email().max(254),password:z.string().min(12).max(128),displayName:z.string().min(2).max(80)}).parse(req.body);
  const exists=await query('SELECT id FROM users WHERE email=$1',[body.email.toLowerCase()]); if(exists.rowCount)return res.status(409).json({error:'Email already registered'});
  const hash=await bcrypt.hash(body.password,12); const r=await query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,role',[body.email.toLowerCase(),hash,body.displayName]);
- req.session.user=r.rows[0]; await logActivity(r.rows[0].id,'account_created'); res.status(201).json({user:req.session.user});
+ req.session.regenerate(async(err)=>{if(err)throw err;req.session.user=r.rows[0];req.session.save(async(saveErr)=>{if(saveErr)throw saveErr;await logActivity(r.rows[0].id,'account_created');res.status(201).json({user:req.session.user});});});
 }));
 app.post('/api/auth/login',authLimiter,asyncRoute(async(req,res)=>{
  const body=z.object({email:z.string().email(),password:z.string().min(1).max(128)}).parse(req.body); const r=await query('SELECT id,email,password_hash,display_name,role FROM users WHERE email=$1',[body.email.toLowerCase()]);
  if(!r.rowCount||!await bcrypt.compare(body.password,r.rows[0].password_hash))return res.status(401).json({error:'Invalid email or password'});
- const u=r.rows[0];req.session.user={id:u.id,email:u.email,display_name:u.display_name,role:u.role};await logActivity(u.id,'login');res.json({user:req.session.user});
+ const u=r.rows[0];req.session.regenerate(async(err)=>{if(err)throw err;req.session.user={id:u.id,email:u.email,display_name:u.display_name,role:u.role};req.session.save(async(saveErr)=>{if(saveErr)throw saveErr;await logActivity(u.id,'login');res.json({user:req.session.user});});});
 }));
-app.post('/api/auth/logout',requireAuth,(req,res)=>req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true});}));
+app.post('/api/auth/logout',requireAuth,(req,res)=>req.session.destroy((err)=>{if(err)return res.status(500).json({error:'Logout failed'});res.clearCookie('connect.sid',{httpOnly:true,sameSite:'lax',secure:process.env.COOKIE_SECURE==='true'});res.json({ok:true});}));
 app.get('/api/auth/me',(req,res)=>res.json({user:req.session.user||null}));
 app.get('/api/dashboard',requireAuth,asyncRoute(async(req,res)=>{
  const uid=req.session.user.id; const [w,c,a]=await Promise.all([query('SELECT count(*)::int n FROM wallets WHERE user_id=$1',[uid]),query('SELECT count(*)::int n FROM campaigns WHERE user_id=$1',[uid]),query('SELECT id,event,metadata,created_at FROM activity WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10',[uid])]);
