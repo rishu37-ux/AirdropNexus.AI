@@ -139,18 +139,18 @@ app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
   const r=await query('SELECT * FROM agent_executions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);
   res.json({logs:r.rows});
 }));
-app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
- const uid=req.session.user.id;
+async function runAgentsForUser(uid){
+
  const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
- if(!cfgR.rowCount||!cfgR.rows[0].enabled)return res.status(400).json({error:'Enable and save agent settings first.'});
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
  const cfg=cfgR.rows[0];
- if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return res.status(400).json({error:'Enable at least one action in Agent settings.'});
- if(cfg.auto_reply)return res.status(400).json({error:'Auto-reply is not enabled in this release: AI reply generation and moderation approval are required. Turn it off to run Like/Repost.'});
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return {status:400,error:'Enable at least one action in Agent settings.'};
+ if(cfg.auto_reply)return {status:400,error:'Auto-reply unavailable; turn it off to run Like/Repost.'};
  const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
- if(!targets.length)return res.status(400).json({error:'Add enabled targets first.'});
+ if(!targets.length)return {status:400,error:'Add enabled targets first.'};
  const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
- if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return res.status(409).json({error:'Connect your X account first.'});
- let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return res.status(e.status||502).json({error:e.message,code:e.code||'X_TOKEN_ERROR'});}
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return {status:409,error:'Connect your X account first.'};
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return {status:e.status||502,error:e.message,code:e.code||'X_TOKEN_ERROR'};}
  const selfId=xAccount.rows[0].x_user_id, queries=[];
  for(const t of targets){
   let q='';
@@ -158,7 +158,7 @@ app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
   else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
   queries.push({target:t,query:q});
  }
- if(!queries.length)return res.status(400).json({error:'Targets need valid X handles or hashtags.'});
+ if(!queries.length)return {status:400,error:'Targets need valid X handles or hashtags.'};
  const discovered=[],errors=[];
  for(const item of queries.slice(0,8)){
   try{
@@ -205,28 +205,22 @@ app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
   }
  }
  await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
- res.json({ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'});
-}));
+ return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
+
+}
+app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
 // GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
 app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
-  const expected=process.env.SCHEDULER_SECRET||'';
-  const supplied=(req.get('authorization')||'').replace(/^Bearer\s+/i,'');
-  if(expected.length<32 || supplied.length!==expected.length ||
-     !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))
-    return res.status(401).json({error:'Unauthorized scheduler'});
-  // Heartbeat/eligibility only: actual X execution stays disabled until
-  // discovery, token refresh, consent, and action-specific verification ship.
-  const r=await query(
-    'SELECT count(*)::int AS enabled_users FROM agent_configs WHERE enabled=true'
-  );
-  res.json({
-    ok:true,
-    scheduler:'received',
-    enabledUsers:r.rows[0].enabled_users,
-    executed:0,
-    simulated:false,
-    message:'Scheduler reached backend. Real agent execution is not enabled yet.'
-  });
+ const expected=process.env.SCHEDULER_SECRET||'';
+ const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
+ const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+ const results=[];
+ for(const row of users){
+  try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+  catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+ }
+ res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0),results});
 }));
 app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
 const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
