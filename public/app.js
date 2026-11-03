@@ -634,25 +634,33 @@ async function deleteAgentTarget(id) {
   } catch (e) { toast('Failed to remove target: ' + e.message, 'rose'); }
 }
 
-async function loadAgentLogs() {
+let agentLogPage=1;
+async function loadAgentLogs(page=agentLogPage) {
+  agentLogPage=Math.max(1,page);
   try {
-    const d = await api('/agents/logs');
-    const el = document.getElementById('agentLogsList');
-    if (!d.logs.length) {
-      el.innerHTML = '<div class="text-center py-8 text-slate-500 text-sm">No agent activity yet. Run a cycle to see logs.</div>';
-      return;
+    const status=document.getElementById('agentLogStatus')?.value||'';
+    const action=document.getElementById('agentLogAction')?.value||'';
+    const qs=new URLSearchParams({page:String(agentLogPage),limit:'20'});
+    if(status)qs.set('status',status);
+    if(action)qs.set('action',action);
+    const d=await api('/agents/logs?'+qs.toString());
+    const el=document.getElementByById('agentLogsList');
+    if(!d.logs.length){
+      el.innerHTML='<div class="text-center py-6 text-slate-500 text-sm">No matching execution records.</div>';
+    }else{
+      el.innerHTML=d.logs.map(l=>{
+        const success=l.status==='success',failed=l.status==='failed';
+        const color=success?'#14b8a6':failed?'#f87171':'#60a5fa';
+        const target=l.target_post_id?'<a class="text-cyan-300 hover:underline" target="_blank" rel="noopener noreferrer" href="https://x.com/i/status/'+encodeURIComponent(l.target_post_id)+'">View post ↗</a>':'';
+        return '<div class="rounded-lg bg-white/[0.03] border border-white/5 p-3"><div class="flex items-center gap-2 flex-wrap"><span class="w-2 h-2 rounded-full" style="background:'+color+'"></span><strong class="text-xs text-slate-200">'+esc((l.action||'event').toUpperCase())+'</strong><span class="text-[10px] px-2 py-0.5 rounded bg-white/5 text-slate-400">'+esc(l.status||'unknown')+'</span><span class="ml-auto text-[10px] text-slate-500">'+new Date(l.created_at).toLocaleString()+'</span></div>'+(l.chain?'<div class="text-[10px] text-slate-500 mt-1">Chain: '+esc(l.chain)+'</div>':'')+(l.target_account?'<div class="text-[10px] text-slate-500 mt-1">Account: @'+esc(l.target_account)+'</div>':'')+(l.message?'<div class="text-xs '+(failed?'text-rose-300':'text-slate-400')+' mt-1 break-words">'+esc(l.message)+'</div>':'')+(target?'<div class="mt-1 text-[10px]">'+target+'</div>':'')+'</div>';
+      }).join('');
     }
-    el.innerHTML = d.logs.map(l => `
-      <div class="activity-item">
-        <div class="activity-dot" style="background:${l.status === 'success' ? '#14b8a6' : '#f87171'}"></div>
-        <div class="activity-event">${esc(l.action.toUpperCase())} ${l.chain ? '<span class="text-xs font-mono text-slate-500 ml-2">[' + esc(l.chain) + ']</span>' : ''}</div>
-        <div class="activity-time">${new Date(l.created_at).toLocaleString()}</div>
-        ${l.wallet_address ? `<div class="activity-meta">${esc(l.wallet_address)}</div>` : ''}
-      </div>
-    `).join('');
-  } catch (e) { toast('Failed to load logs: ' + e.message, 'rose'); }
+    document.getElementById('agentLogCount').textContent=(d.total||0)+' records';
+    document.getElementById('agentLogPageLabel').textContent='Page '+d.page+' / '+d.totalPages;
+    document.getElementById('agentLogPrev').disabled=d.page<=1;
+    document.getElementById('agentLogNext').disabled=d.page>=d.totalPages;
+  } catch(e){toast('Failed to load logs: '+e.message,'rose');}
 }
-
 async function runAgentCycle() {
   const btn = document.getElementById('btnRunAgentCycle');
   btn.disabled = true;
