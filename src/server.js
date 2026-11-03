@@ -131,5 +131,26 @@ app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
     targets:targetsR.rowCount
   });
 }));
+// GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
+app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
+  const expected=process.env.SCHEDULER_SECRET||'';
+  const supplied=(req.get('authorization')||'').replace(/^Bearer\s+/i,'');
+  if(expected.length<32 || supplied.length!==expected.length ||
+     !crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))
+    return res.status(401).json({error:'Unauthorized scheduler'});
+  // Heartbeat/eligibility only: actual X execution stays disabled until
+  // discovery, token refresh, consent, and action-specific verification ship.
+  const r=await query(
+    'SELECT count(*)::int AS enabled_users FROM agent_configs WHERE enabled=true'
+  );
+  res.json({
+    ok:true,
+    scheduler:'received',
+    enabledUsers:r.rows[0].enabled_users,
+    executed:0,
+    simulated:false,
+    message:'Scheduler reached backend. Real agent execution is not enabled yet.'
+  });
+}));
 app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
 const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
