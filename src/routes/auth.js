@@ -33,16 +33,27 @@ router.get('/status', (req, res) => {
   });
 });
 
-router.post('/demo-login', (req, res) => {
-  req.session.userId = 1;
-  req.session.role = 'owner';
-  logger.info('Demo login established', { userId: 1 });
-  res.json({ ok: true, user: { id: 1, email: 'owner@airdropnexus.local', role: 'owner' } });
+router.post('/demo-login', (req, res, next) => {
+  const demoEnabled = process.env.ENABLE_DEMO_LOGIN === 'true' ||
+    (config.env !== 'production' && process.env.ENABLE_DEMO_LOGIN !== 'false');
+  if (!demoEnabled) {
+    return res.status(403).json({ error: 'Demo login is disabled. Configure a real authentication provider.' });
+  }
+  req.session.regenerate((err) => {
+    if (err) return next(err);
+    req.session.userId = 1;
+    req.session.role = 'owner';
+    req.session.save((saveErr) => {
+      if (saveErr) return next(saveErr);
+      logger.info('Demo login established', { userId: 1 });
+      res.json({ ok: true, user: { id: 1, email: 'owner@airdropnexus.local', role: 'owner' } });
+    });
+  });
 });
 
 router.post('/logout', (req, res) => {
   req.session.destroy(() => {
-    res.clearCookie('connect.sid');
+    res.clearCookie('an_session', { httpOnly: true, sameSite: 'lax', secure: config.env === 'production' });
     res.json({ ok: true });
   });
 });
