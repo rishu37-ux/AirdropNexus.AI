@@ -37,11 +37,39 @@ app.post('/api/campaigns',requireAuth,asyncRoute(async(req,res)=>{const b=z.obje
 app.patch('/api/campaigns/:id',requireAuth,asyncRoute(async(req,res)=>{const b=z.object({title:z.string().min(2).max(160).optional(),projectUrl:z.string().url().optional().or(z.literal('')),status:z.enum(['watching','researching','eligible','claimed','not_eligible','archived']).optional(),notes:z.string().max(5000).optional(),deadline:z.string().datetime().nullable().optional()}).parse(req.body);const r=await query('UPDATE campaigns SET title=COALESCE($3,title),project_url=COALESCE($4,project_url),status=COALESCE($5,status),notes=COALESCE($6,notes),deadline=COALESCE($7,deadline),updated_at=now() WHERE id=$1 AND user_id=$2 RETURNING *',[req.params.id,req.session.user.id,b.title,b.projectUrl,b.status,b.notes,b.deadline]);if(!r.rowCount)return res.status(404).json({error:'Campaign not found'});res.json({campaign:r.rows[0]});}));
 app.delete('/api/campaigns/:id',requireAuth,asyncRoute(async(req,res)=>{const r=await query('DELETE FROM campaigns WHERE id=$1 AND user_id=$2',[req.params.id,req.session.user.id]);if(!r.rowCount)return res.status(404).json({error:'Campaign not found'});res.json({ok:true});}));
 app.get('/api/activity',requireAuth,asyncRoute(async(req,res)=>{const r=await query('SELECT id,event,metadata,created_at FROM activity WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);res.json({activity:r.rows});}));
+// Refresh OAuth access tokens safely. X rotates refresh tokens; serialize refreshes per user with a PostgreSQL advisory lock.
+async function getValidXAccessToken(userId){
+ const client=await pool.connect();
+ try{
+  await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[String(userId)]);
+  const r=await client.query('SELECT access_token,refresh_token,expires_at FROM x_oauth_tokens WHERE user_id=$1 FOR UPDATE',[userId]);
+  if(!r.rowCount) throw Object.assign(new Error('Connect your X account first'),{status:409});
+  const row=r.rows[0], expires=row.expires_at?new Date(row.expires_at).getTime():0;
+  if(expires>Date.now()+120000){await client.query('COMMIT');return row.access_token;}
+  if(!row.refresh_token) throw Object.assign(new Error('X session expired. Reconnect your X account.'),{status:409,code:'X_RECONNECT'});
+  const form=new URLSearchParams({grant_type:'refresh_token',refresh_token:row.refresh_token,client_id:process.env.X_CLIENT_ID});
+  const headers={'Content-Type':'application/x-www-form-urlencoded'};
+  if(process.env.X_CLIENT_SECRET) headers.Authorization='Basic '+Buffer.from(process.env.X_CLIENT_ID+':'+process.env.X_CLIENT_SECRET).toString('base64');
+  const response=await fetch('https://api.twitter.com/2/oauth2/token',{method:'POST',headers,body:form});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok||!data.access_token){
+   await client.query('ROLLBACK');
+   throw Object.assign(new Error('X token refresh failed. Reconnect your X account.'),{status:409,code:'X_RECONNECT'});
+  }
+  const expiresAt=new Date(Date.now()+(Number(data.expires_in)||7200)*1000);
+  await client.query('UPDATE x_oauth_tokens SET access_token=$2,refresh_token=COALESCE($3,refresh_token),expires_at=$4,updated_at=now() WHERE user_id=$1',[userId,data.access_token,data.refresh_token||null,expiresAt]);
+  await client.query('COMMIT');
+  return data.access_token;
+ }catch(e){try{await client.query('ROLLBACK')}catch{};throw e;}
+ }finally{client.release();}
+}
+
 // X OAuth 2.0 PKCE: requires credentials configured in .env and matching developer portal callback.
-app.get('/api/x/connect',requireAuth,(req,res)=>{if(!process.env.X_CLIENT_ID||!process.env.X_CALLBACK_URL)return res.status(503).send('X OAuth credentials are not configured.');const verifier=crypto.randomBytes(32).toString('base64url'),challenge=crypto.createHash('sha256').update(verifier).digest('base64url'),state=crypto.randomBytes(24).toString('hex');req.session.xpkce={verifier,state};const u=new URL('https://twitter.com/i/oauth2/authorize');u.search=new URLSearchParams({response_type:'code',client_id:process.env.X_CLIENT_ID,redirect_uri:process.env.X_CALLBACK_URL,scope:'users.read tweet.read tweet.write offline.access',state,code_challenge:challenge,code_challenge_method:'S256'});res.redirect(u.toString());});
-app.get('/api/x/callback',requireAuth,asyncRoute(async(req,res)=>{const {code,state,error}=req.query,stored=req.session.xpkce;if(error||!code||!stored||state!==stored.state)return res.redirect('/?x=connect_failed');const body=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:process.env.X_CALLBACK_URL,code_verifier:stored.verifier});const auth=Buffer.from(`${process.env.X_CLIENT_ID}:${process.env.X_CLIENT_SECRET||''}`).toString('base64');const token=await fetch('https://api.twitter.com/2/oauth2/token',{method:'POST',headers:{Authorization:`Basic ${auth}`,'Content-Type':'application/x-www-form-urlencoded'},body});const td=await token.json();if(!token.ok)return res.status(502).send('X token exchange failed: '+JSON.stringify(td));const me=await fetch('https://api.twitter.com/2/users/me',{headers:{Authorization:`Bearer ${td.access_token}`}});const md=await me.json();const expiry=new Date(Date.now()+(td.expires_in||7200)*1000);await query('INSERT INTO x_oauth_tokens(user_id,access_token,refresh_token,expires_at,x_user_id,x_username) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET access_token=$2,refresh_token=COALESCE($3,x_oauth_tokens.refresh_token),expires_at=$4,x_user_id=$5,x_username=$6,updated_at=now()',[req.session.user.id,td.access_token,td.refresh_token||null,expiry,md.data?.id||null,md.data?.username||null]);delete req.session.xpkce;await logActivity(req.session.user.id,'x_account_connected',{username:md.data?.username});res.redirect('/?x=connected');}));
+app.get('/api/x/connect',requireAuth,(req,res)=>{if(!process.env.X_CLIENT_ID||!process.env.X_CALLBACK_URL)return res.status(503).send('X OAuth credentials are not configured.');const verifier=crypto.randomBytes(32).toString('base64url'),challenge=crypto.createHash('sha256').update(verifier).digest('base64url'),state=crypto.randomBytes(24).toString('hex');req.session.xpkce={verifier,state};const u=new URL('https://twitter.com/i/oauth2/authorize');u.search=new URLSearchParams({response_type:'code',client_id:process.env.X_CLIENT_ID,redirect_uri:process.env.X_CALLBACK_URL,scope:'users.read tweet.read tweet.write like.write offline.access',state,code_challenge:challenge,code_challenge_method:'S256'});res.redirect(u.toString());});
+app.get('/api/x/callback',requireAuth,asyncRoute(async(req,res)=>{const {code,state,error}=req.query,stored=req.session.xpkce;if(error||!code||!stored||state!==stored.state)return res.redirect('/?x=connect_failed');const body=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:process.env.X_CALLBACK_URL,code_verifier:stored.verifier});const tokenHeaders={'Content-Type':'application/x-www-form-urlencoded'};if(process.env.X_CLIENT_SECRET)tokenHeaders.Authorization='Basic '+Buffer.from(process.env.X_CLIENT_ID+':'+process.env.X_CLIENT_SECRET).toString('base64');else body.set('client_id',process.env.X_CLIENT_ID);const token=await fetch('https://api.twitter.com/2/oauth2/token',{method:'POST',headers:tokenHeaders,body});const td=await token.json();if(!token.ok)return res.status(502).send('X token exchange failed: '+JSON.stringify(td));const me=await fetch('https://api.twitter.com/2/users/me',{headers:{Authorization:`Bearer ${td.access_token}`}});const md=await me.json();const expiry=new Date(Date.now()+(td.expires_in||7200)*1000);await query('INSERT INTO x_oauth_tokens(user_id,access_token,refresh_token,expires_at,x_user_id,x_username) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET access_token=$2,refresh_token=COALESCE($3,x_oauth_tokens.refresh_token),expires_at=$4,x_user_id=$5,x_username=$6,updated_at=now()',[req.session.user.id,td.access_token,td.refresh_token||null,expiry,md.data?.id||null,md.data?.username||null]);delete req.session.xpkce;await logActivity(req.session.user.id,'x_account_connected',{username:md.data?.username});res.redirect('/?x=connected');}));
 app.get('/api/x/status',requireAuth,asyncRoute(async(req,res)=>{const r=await query('SELECT x_username,expires_at FROM x_oauth_tokens WHERE user_id=$1',[req.session.user.id]);res.json({connected:!!r.rowCount,username:r.rows[0]?.x_username||null,expiresAt:r.rows[0]?.expires_at||null});}));
-app.post('/api/x/post',requireAuth,asyncRoute(async(req,res)=>{const b=z.object({text:z.string().min(1).max(280)}).parse(req.body);const r=await query('SELECT access_token FROM x_oauth_tokens WHERE user_id=$1',[req.session.user.id]);if(!r.rowCount)return res.status(409).json({error:'Connect your X account first'});const api=await fetch('https://api.twitter.com/2/tweets',{method:'POST',headers:{Authorization:`Bearer ${r.rows[0].access_token}`,'Content-Type':'application/json'},body:JSON.stringify({text:b.text})});const data=await api.json();if(!api.ok)return res.status(api.status).json({error:'X API rejected the post',details:data});await logActivity(req.session.user.id,'x_post_created',{tweetId:data.data?.id});res.status(201).json({tweet:data.data});}));
+app.post('/api/x/post',requireAuth,asyncRoute(async(req,res)=>{const b=z.object({text:z.string().min(1).max(280)}).parse(req.body);let accessToken;try{accessToken=await getValidXAccessToken(req.session.user.id);}catch(e){return res.status(e.status||502).json({error:e.message,code:e.code||'X_TOKEN_ERROR'});}const api=await fetch('https://api.twitter.com/2/tweets',{method:'POST',headers:{Authorization:`Bearer ${accessToken}`,'Content-Type':'application/json'},body:JSON.stringify({text:b.text})});const data=await api.json();if(!api.ok)return res.status(api.status).json({error:'X API rejected the post',details:data});await logActivity(req.session.user.id,'x_post_created',{tweetId:data.data?.id});res.status(201).json({tweet:data.data});}));
 // ---------- Agent chain detection ----------
 const CHAIN_KEYWORDS = {
   Solana: ['solana', '$sol', 'sol ', ' jupiter', 'phantom', 'solan'],
@@ -112,24 +140,42 @@ app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
   res.json({logs:r.rows});
 }));
 app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
-  // Fail closed: discovery and execution must never be simulated as successful.
-  const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[req.session.user.id]);
-  if(!cfgR.rowCount)return res.status(400).json({error:'Agent config not found. Save settings first.'});
-  if(!cfgR.rows[0].enabled)return res.status(400).json({error:'Agents are disabled.'});
-  const targetsR=await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[req.session.user.id]);
-  if(!targetsR.rowCount)return res.status(400).json({error:'No enabled agent targets configured.'});
-  const xAccount=await query('SELECT x_user_id,x_username,expires_at FROM x_oauth_tokens WHERE user_id=$1',[req.session.user.id]);
-  if(!xAccount.rowCount)return res.status(409).json({error:'Connect your X account before running agents.'});
-  if(xAccount.rows[0].expires_at && new Date(xAccount.rows[0].expires_at)<=new Date())
-    return res.status(409).json({error:'Your X access token has expired. Reconnect your X account.'});
-  // X discovery endpoints and action-specific permission checks are not implemented yet.
-  // Do not insert agent_executions rows or report success until real API calls occur.
-  return res.status(503).json({
-    error:'Agent execution is temporarily unavailable while real X discovery and action verification are being implemented.',
-    executed:0,
-    simulated:false,
-    targets:targetsR.rowCount
-  });
+ const uid=req.session.user.id;
+ const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
+ if(!cfgR.rowCount||!cfgR.rows[0].enabled)return res.status(400).json({error:'Enable and save agent settings first.'});
+ const cfg=cfgR.rows[0],targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ if(!targets.length)return res.status(400).json({error:'Add enabled targets first.'});
+ let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return res.status(e.status||502).json({error:e.message,code:e.code||'X_TOKEN_ERROR'});}
+ const queries=[];
+ for(const t of targets){
+  let q='';
+  if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
+  else {const handle=t.target_value.replace(/^@/,'').trim();if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))continue;q='from:'+handle;}
+  queries.push({target:t,query:q});
+ }
+ if(!queries.length)return res.status(400).json({error:'Targets need valid X handles or hashtags.'});
+ const discovered=[],errors=[];
+ for(const item of queries.slice(0,8)){
+  try{
+   const url=new URL('https://api.x.com/2/tweets/search/recent');
+   url.searchParams.set('query',item.query+' -is:retweet');
+   url.searchParams.set('max_results','10');
+   url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
+   const api=await fetch(url,{headers:{Authorization:'Bearer '+accessToken}});
+   const data=await api.json().catch(()=>({}));
+   if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
+   for(const tweet of (data.data||[])){
+    discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+   }
+  }catch(e){errors.push({target:item.query,message:'Network error querying X'});}
+ }
+ // Discovery is read-only. Never auto-like/repost/reply without a separate explicit action endpoint and audit.
+ const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
+ for(const t of unique){
+  await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,'discover',$2,$3,$4,'discovered',$5)",[uid,t.id,String(t.authorId||''),detectChain(t.text),t.target]);
+ }
+ await logActivity(uid,'agent_discovery_completed',{found:unique.length,targets:queries.length});
+ res.json({ok:true,mode:'read_only_discovery',discovered:unique, count:unique.length,errors,actionsExecuted:0,message:'Real X discovery completed. Posts are surfaced for review; likes/reposts/replies remain manual until individually authorized.'});
 }));
 // GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
 app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
