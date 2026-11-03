@@ -112,61 +112,24 @@ app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
   res.json({logs:r.rows});
 }));
 app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
+  // Fail closed: discovery and execution must never be simulated as successful.
   const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[req.session.user.id]);
   if(!cfgR.rowCount)return res.status(400).json({error:'Agent config not found. Save settings first.'});
-  const cfg=cfgR.rows[0];
-  if(!cfg.enabled)return res.status(400).json({error:'Agents are disabled.'});
-  const targetsR=await query('SELECT * FROM agent_targets WHERE user_id=$1 AND enabled=true',[req.session.user.id]);
-  const walletsR=await query('SELECT * FROM wallets WHERE user_id=$1',[req.session.user.id]);
-  const walletsByChain={};
-  for(const w of walletsR.rows){
-    if(!walletsByChain[w.chain])walletsByChain[w.chain]=[];
-    walletsByChain[w.chain].push(w);
-  }
-  const logs=[];
-  let actionsThisHour=0;
-  const hourStart=Date.now();
-  const simulate=!process.env.X_CLIENT_ID;
-  for(const t of targetsR.rows){
-    if(actionsThisHour>=cfg.max_per_hour)break;
-    // Simulate discovering a recent post from target (demo data)
-    const demoPosts=[
-      {text:'Drop your Solana address for the airdrop! @JupiterExchange #SOL',author:'@solana_alpha',chain:'Solana'},
-      {text:'Bitcoin community check-in. Post your BTC address.',author:'@btc_builders',chain:'Bitcoin'},
-      {text:'Polygon ecosystem update. Share your POL address.',author:'@polygon_dev',chain:'Polygon'},
-      {text:'Ethereum L2 airdrop. Drop your ETH address.',author:'@eth_fans',chain:'Ethereum'},
-      {text:'BNB Chain contributors needed. Post your BNB address.',author:'@bnb_community',chain:'BNB Chain'},
-    ];
-    const post=demoPosts[Math.floor(Math.random()*demoPosts.length)];
-    const detectedChain=detectChain(post.text)||post.chain;
-    const cfgChains=typeof cfg.chains==='string'?JSON.parse(cfg.chains):cfg.chains;
-    if(!cfgChains.includes(detectedChain))continue;
-    const chainWallets=walletsByChain[detectedChain];
-    if(!chainWallets||!chainWallets.length){
-      logs.push({action:'skip',target:t.target_value,chain:detectedChain,wallet_address:null,status:'skipped',message:`No ${detectedChain} wallet saved`});
-      continue;
-    }
-    const wallet=chainWallets[0];
-    if(cfg.auto_like&&actionsThisHour<cfg.max_per_hour){
-      await query('INSERT INTO agent_executions(user_id,action,target_account,chain,wallet_address,status,message) VALUES($1,$2,$3,$4,$5,$6,$7)',[req.session.user.id,'like',t.target_value,detectedChain,wallet.address,'success',simulate?'Simulated like':'Liked']);
-      actionsThisHour++;logs.push({action:'like',target:t.target_value,chain:detectedChain,wallet_address:wallet.address,status:'success',message:simulate?'Simulated like on X':'Liked on X'});
-    }
-    if(cfg.auto_repost&&actionsThisHour<cfg.max_per_hour){
-      await query('INSERT INTO agent_executions(user_id,action,target_account,chain,wallet_address,status,message) VALUES($1,$2,$3,$4,$5,$6,$7)',[req.session.user.id,'repost',t.target_value,detectedChain,wallet.address,'success',simulate?'Simulated repost':'Reposted']);
-      actionsThisHour++;logs.push({action:'repost',target:t.target_value,chain:detectedChain,wallet_address:wallet.address,status:'success',message:simulate?'Simulated repost on X':'Reposted on X'});
-    }
-    if(cfg.auto_reply&&actionsThisHour<cfg.max_per_hour){
-      await query('INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,wallet_address,status,message) VALUES($1,$2,$3,$4,$5,$6,$7)',[req.session.user.id,'reply',`demo_${Date.now()}`,t.target_value,detectedChain,wallet.address,'success',simulate?'Simulated reply with wallet':'Replied with wallet address']);
-      actionsThisHour++;logs.push({action:'reply',target:t.target_value,chain:detectedChain,wallet_address:wallet.address,status:'success',message:simulate?'Simulated reply with wallet address':'Replied with wallet address'});
-    }
-    // delay between targets
-    if(t!==targetsR.rows[targetsR.rows.length-1]){
-      const delay=Math.floor(Math.random()*(cfg.max_delay_sec-cfg.min_delay_sec+1))+cfg.min_delay_sec;
-      await new Promise(r=>setTimeout(r,delay*1000));
-    }
-  }
-  await logActivity(req.session.user.id,'agent_run_cycle',{targets:targetsR.rows.length,actions:actionsThisHour});
-  res.json({simulated:simulate,actions:actionsThisHour,logs});
+  if(!cfgR.rows[0].enabled)return res.status(400).json({error:'Agents are disabled.'});
+  const targetsR=await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[req.session.user.id]);
+  if(!targetsR.rowCount)return res.status(400).json({error:'No enabled agent targets configured.'});
+  const xAccount=await query('SELECT x_user_id,x_username,expires_at FROM x_oauth_tokens WHERE user_id=$1',[req.session.user.id]);
+  if(!xAccount.rowCount)return res.status(409).json({error:'Connect your X account before running agents.'});
+  if(xAccount.rows[0].expires_at && new Date(xAccount.rows[0].expires_at)<=new Date())
+    return res.status(409).json({error:'Your X access token has expired. Reconnect your X account.'});
+  // X discovery endpoints and action-specific permission checks are not implemented yet.
+  // Do not insert agent_executions rows or report success until real API calls occur.
+  return res.status(503).json({
+    error:'Agent execution is temporarily unavailable while real X discovery and action verification are being implemented.',
+    executed:0,
+    simulated:false,
+    targets:targetsR.rowCount
+  });
 }));
 app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
 const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
