@@ -1,0 +1,32 @@
+name: Agent Scheduler (Free GitHub Actions)
+
+on:
+  schedule:
+    # GitHub scheduled workflows run on UTC. Every 15 minutes.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Heartbeat only (agent engine is not yet enabled)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: airdropnexus-agent-scheduler
+  cancel-in-progress: false
+
+jobs:
+  scheduler-heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Scheduler heartbeat
+        run: |
+          echo "AirDropNexus scheduler fired at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "This is a timer heartbeat only."
+          echo "Real agent execution remains fail-closed until the X discovery/action engine and secure server scheduler endpoint are implemented."
+          echo "No X actions were executed; no simulated successes were recorded."
