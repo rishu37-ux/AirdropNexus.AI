@@ -170,7 +170,7 @@ app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
   const r=await query('SELECT * FROM agent_executions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);
   res.json({logs:r.rows});
 }));
-async function runAgentsForUser(uid){
+async function runAgentsForUserUnlocked(uid){
 
  const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
  if(!cfgR.rowCount||!cfgR.rows[0].enabled)return {status:400,error:'Enable and save agent settings first.'};
@@ -238,6 +238,20 @@ async function runAgentsForUser(uid){
  await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
  return {ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'};
 
+}
+// Per-user session advisory lock: manual and scheduled runs cannot overlap for one account.
+async function runAgentsForUser(uid){
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked',['airdropnexus:user-agent:'+String(uid)]);
+  locked=lock.rows[0].locked;
+  if(!locked)return {status:409,error:'An agent cycle is already running for this account.',retryAfterSeconds:30};
+  return await runAgentsForUserUnlocked(uid);
+ }finally{
+  if(locked){try{await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))',['airdropnexus:user-agent:'+String(uid)]);}catch(e){console.error('User agent lock release failed',e);}}
+  lockClient.release();
+ }
 }
 app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{const result=await runAgentsForUser(req.session.user.id);if(result.status)return res.status(result.status).json(result);res.json(result);}));
 // GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
