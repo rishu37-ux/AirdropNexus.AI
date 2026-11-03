@@ -229,13 +229,24 @@ app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
  const expected=process.env.SCHEDULER_SECRET||'';
  const supplied=(req.get('authorization')||'').replace(/^Bearer\\s+/i,'');
  if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Unauthorized scheduler'});
- const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
- const results=[];
- for(const row of users){
-  try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
-  catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+ // A session-level advisory lock prevents overlapping cron/manual dispatches.
+ const lockClient=await pool.connect();
+ let locked=false;
+ try{
+  const lock=await lockClient.query("SELECT pg_try_advisory_lock(hashtext('airdropnexus:global-agent-scheduler')) AS locked");
+  locked=lock.rows[0].locked;
+  if(!locked)return res.status(409).json({error:'Scheduler is already running',retryAfterSeconds:60});
+  const users=(await query('SELECT user_id FROM agent_configs WHERE enabled=true ORDER BY updated_at ASC LIMIT 100')).rows;
+  const results=[];
+  for(const row of users){
+   try{const result=await runAgentsForUser(row.user_id);results.push({userId:row.user_id,ok:!!result.ok,discovered:result.discovered||0,executedCount:result.executedCount||0,error:result.error||null});}
+   catch{results.push({userId:row.user_id,ok:false,error:'Agent run failed'});}
+  }
+  res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0)});
+ }finally{
+  if(locked){try{await lockClient.query("SELECT pg_advisory_unlock(hashtext('airdropnexus:global-agent-scheduler'))");}catch(e){console.error('Scheduler lock release failed',e);}}
+  lockClient.release();
  }
- res.json({ok:true,scheduler:'completed',usersProcessed:results.length,executed:results.reduce((n,r)=>n+r.executedCount,0),results});
 }));
 app.use((err,req,res,next)=>{console.error(err);if(err.name==='ZodError')return res.status(400).json({error:'Invalid request',details:err.errors});res.status(500).json({error:process.env.NODE_ENV==='production'?'Internal server error':err.message});});
 const port=process.env.PORT||3000;app.listen(port,()=>console.log(`AirDropNexus listening on ${port}`));
