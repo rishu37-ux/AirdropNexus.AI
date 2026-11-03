@@ -100,7 +100,7 @@ function switchView(view) {
   if (view === 'wallets') loadWallets();
   if (view === 'campaigns') loadCampaigns();
   if (view === 'activity') loadActivityFull();
-  if (view === 'x') { loadXStatus(); loadAgentConfig(); loadAgentTargets(); loadAgentLogs(); }
+  if (view === 'x') { loadXStatus(); loadAgentConfig(); loadAgentTargets(); loadAgentLogs(); loadAgentMonitoring(); }
 }
 
 // Chain chip toggle
@@ -502,6 +502,44 @@ document.getElementById('xPostForm').onsubmit = async (e) => {
   }
 };
 
+// ---------- Agent Monitoring Center ----------
+let agentMonitoringEnabled=false;
+async function loadAgentMonitoring(){
+ try{
+  const d=await api('/agents/monitoring'),m=d.metrics||{};
+  agentMonitoringEnabled=!!d.enabled;
+  document.getElementById('monSucceeded').textContent=m.succeeded??0;
+  document.getElementById('monFailed').textContent=m.failed??0;
+  document.getElementById('monDiscovered').textContent=m.discovered??0;
+  document.getElementById('mon24h').textContent=m.actions24h??0;
+  document.getElementById('monLastActivity').textContent=m.lastActivity?new Date(m.lastActivity).toLocaleString():'No activity yet';
+  document.getElementById('monLike').textContent=d.actions?.like?'ON':'OFF';
+  document.getElementById('monRepost').textContent=d.actions?.repost?'ON':'OFF';
+  document.getElementById('monReply').textContent=d.actions?.reply?'ON':'OFF';
+  document.getElementById('monCap').textContent=d.maxPerHour??20;
+  const btn=document.getElementById('btnAgentPauseResume');
+  btn.textContent=agentMonitoringEnabled?'Pause All':'Resume Agents';
+  btn.className=agentMonitoringEnabled?'px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-semibold':'px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs font-semibold';
+  const el=document.getElementById('monRecent');
+  if(!d.recent?.length){el.innerHTML='<p class="text-xs text-slate-500 py-3">No agent events recorded yet.</p>';return;}
+  el.innerHTML=d.recent.map(x=>{
+   const ok=x.status==='success', discovered=x.status==='discovered';
+   const color=ok?'text-emerald-300':discovered?'text-cyan-300':'text-rose-300';
+   return '<div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-lg bg-white/5 border border-white/5"><div><span class="text-xs font-bold '+color+'">'+esc((x.action||'event').toUpperCase())+' · '+esc((x.status||'').toUpperCase())+'</span><p class="text-[10px] text-slate-500 mt-1">'+esc(x.message||'')+'</p></div><span class="text-[10px] text-slate-500">'+new Date(x.created_at).toLocaleString()+'</span></div>';
+  }).join('');
+ }catch(e){document.getElementById('monRecent').innerHTML='<p class="text-xs text-rose-300">'+esc(e.message)+'</p>';}
+}
+async function controlAgents(){
+ const enabled=!agentMonitoringEnabled;
+ const btn=document.getElementById('btnAgentPauseResume');btn.disabled=true;
+ try{
+  await api('/agents/control',{method:'POST',body:JSON.stringify({enabled})});
+  await Promise.all([loadAgentConfig(),loadAgentMonitoring()]);
+  toast(enabled?'Agents resumed':'All agents paused');
+ }catch(e){toast('Agent control failed: '+e.message,'rose');}
+ finally{btn.disabled=false;}
+}
+
 // ---------- Agents ----------
 async function loadAgentConfig() {
   try {
@@ -623,6 +661,7 @@ async function runAgentCycle() {
     const d = await api('/agents/run', { method: 'POST' });
     toast(d.simulated ? `Agent cycle complete: ${d.actions} actions (simulated)` : `Agent cycle complete: ${d.actions} live actions`);
     loadAgentLogs();
+    loadAgentMonitoring();
     loadDashboard();
   } catch (e) { toast('Agent cycle failed: ' + e.message, 'rose'); } finally {
     btn.disabled = false;
