@@ -143,10 +143,15 @@ app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
  const uid=req.session.user.id;
  const cfgR=await query('SELECT * FROM agent_configs WHERE user_id=$1',[uid]);
  if(!cfgR.rowCount||!cfgR.rows[0].enabled)return res.status(400).json({error:'Enable and save agent settings first.'});
- const cfg=cfgR.rows[0],targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
+ const cfg=cfgR.rows[0];
+ if(!cfg.auto_like&&!cfg.auto_repost&&!cfg.auto_reply)return res.status(400).json({error:'Enable at least one action in Agent settings.'});
+ if(cfg.auto_reply)return res.status(400).json({error:'Auto-reply is not enabled in this release: AI reply generation and moderation approval are required. Turn it off to run Like/Repost.'});
+ const targets=(await query('SELECT id,target_type,target_value FROM agent_targets WHERE user_id=$1 AND enabled=true',[uid])).rows;
  if(!targets.length)return res.status(400).json({error:'Add enabled targets first.'});
+ const xAccount=await query('SELECT x_user_id,x_username FROM x_oauth_tokens WHERE user_id=$1',[uid]);
+ if(!xAccount.rowCount||!xAccount.rows[0].x_user_id)return res.status(409).json({error:'Connect your X account first.'});
  let accessToken;try{accessToken=await getValidXAccessToken(uid);}catch(e){return res.status(e.status||502).json({error:e.message,code:e.code||'X_TOKEN_ERROR'});}
- const queries=[];
+ const selfId=xAccount.rows[0].x_user_id, queries=[];
  for(const t of targets){
   let q='';
   if(t.target_type==='hashtag'){const tag=t.target_value.replace(/^#/,'').trim();if(!/^[A-Za-z0-9_]{1,100}$/.test(tag))continue;q='#'+tag;}
@@ -158,24 +163,49 @@ app.post('/api/agents/run',requireAuth,asyncRoute(async(req,res)=>{
  for(const item of queries.slice(0,8)){
   try{
    const url=new URL('https://api.x.com/2/tweets/search/recent');
-   url.searchParams.set('query',item.query+' -is:retweet');
+   url.searchParams.set('query',item.query+' -is:retweet -is:reply');
    url.searchParams.set('max_results','10');
    url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
    const api=await fetch(url,{headers:{Authorization:'Bearer '+accessToken}});
    const data=await api.json().catch(()=>({}));
    if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
-   for(const tweet of (data.data||[])){
-    discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
-   }
-  }catch(e){errors.push({target:item.query,message:'Network error querying X'});}
+   for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
+  }catch{errors.push({target:item.query,message:'Network error querying X'});}
  }
- // Discovery is read-only. Never auto-like/repost/reply without a separate explicit action endpoint and audit.
  const unique=[...new Map(discovered.map(t=>[t.id,t])).values()].slice(0,50);
- for(const t of unique){
-  await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,'discover',$2,$3,$4,'discovered',$5)",[uid,t.id,String(t.authorId||''),detectChain(t.text),t.target]);
+ let hourly=await query("SELECT count(*)::int n FROM agent_executions WHERE user_id=$1 AND status='success' AND action IN ('like','repost') AND created_at>now()-interval '1 hour'",[uid]);
+ let remaining=Math.max(0,Number(cfg.max_per_hour)-hourly.rows[0].n),executed=[],skipped=0;
+ for(const tweet of unique){
+  if(remaining<=0){skipped++;continue;}
+  for(const action of ['like','repost']){
+   if(action==='like'&&!cfg.auto_like||action==='repost'&&!cfg.auto_repost)continue;
+   if(remaining<=0){skipped++;break;}
+   const exists=await query("SELECT id FROM agent_executions WHERE user_id=$1 AND action=$2 AND target_post_id=$3 AND status='success'",[uid,action,tweet.id]);
+   if(exists.rowCount)continue;
+   const min=Math.max(1,Number(cfg.min_delay_sec)||1),max=Math.max(min,Number(cfg.max_delay_sec)||min);
+   if(executed.length)await new Promise(resolve=>setTimeout(resolve,(min+Math.floor(Math.random()*(max-min+1)))*1000));
+   let endpoint,body;
+   if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
+   else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
+   try{
+    const api=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await api.json().catch(()=>({}));
+    if(api.ok){
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
+     executed.push({action,tweetId:tweet.id,target:tweet.target});remaining--;
+    }else{
+     const msg=data.detail||data.title||'X API rejected action';
+     await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'failed',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,String(msg).slice(0,500)]);
+     errors.push({action,tweetId:tweet.id,status:api.status,message:msg});
+     if(api.status===401||api.status===403||api.status===429)break;
+    }
+   }catch{
+    errors.push({action,tweetId:tweet.id,message:'Network error calling X action endpoint'});
+   }
+  }
  }
- await logActivity(uid,'agent_discovery_completed',{found:unique.length,targets:queries.length});
- res.json({ok:true,mode:'read_only_discovery',discovered:unique, count:unique.length,errors,actionsExecuted:0,message:'Real X discovery completed. Posts are surfaced for review; likes/reposts/replies remain manual until individually authorized.'});
+ await logActivity(uid,'agent_run_completed',{discovered:unique.length,executed:executed.length,skipped});
+ res.json({ok:true,mode:'live_api',discovered:unique.length,executed,executedCount:executed.length,remainingHourly:remaining,skipped,errors,message:'Only actions confirmed by X are marked successful. Auto-replies remain disabled.'});
 }));
 // GitHub Actions scheduler ingress. Configure SCHEDULER_SECRET (32+ chars) on the server.
 app.post('/api/internal/scheduler/run',asyncRoute(async(req,res)=>{
