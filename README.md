@@ -27,7 +27,7 @@ This package is a real server-backed application foundation, not a localStorage 
 - Run dependency audit and security testing before public launch.
 
 ## X integration
-In the X Developer Portal, configure OAuth 2.0 Authorization Code with PKCE and add the exact callback URL from `X_CALLBACK_URL`. Set `X_CLIENT_ID`, `X_CLIENT_SECRET` (confidential client), and `X_CALLBACK_URL` in `.env`. Scopes requested: `users.read tweet.read tweet.write offline.access`. API access tiers, quotas, and policy are controlled by X. The app stores access/refresh tokens in PostgreSQL; for production, encrypt tokens at rest with a managed KMS or application-level envelope encryption and implement refresh-token rotation/expiry handling.
+In the X Developer Portal, configure OAuth 2.0 Authorization Code with PKCE and add the exact callback URL from `X_CALLBACK_URL`. Set `X_CLIENT_ID`, `X_CLIENT_SECRET` (confidential client), and `X_CALLBACK_URL` in `.env`. Scopes requested: `users.read tweet.read tweet.write like.write offline.access`. Existing X connections must reconnect to grant the added `like.write` scope. API access tiers, quotas, and policy are controlled by X. The app stores access/refresh tokens in PostgreSQL and refreshes near-expiry access tokens using the rotating refresh token (serialized per user); for production, encrypt tokens at rest with a managed KMS or application-level envelope encryption.
 
 ## Current functional modules
 - Account registration/sign-in/sign-out with bcrypt password hashes and server sessions (PostgreSQL session store)
@@ -35,12 +35,12 @@ In the X Developer Portal, configure OAuth 2.0 Authorization Code with PKCE and 
 - Wallet address book (create/list/delete, per-user data isolation)
 - Campaign tracker (create/list/update status/delete)
 - Activity log
-- X OAuth PKCE connect/status and real post endpoint (requires configured X app and granted access)
+- X OAuth PKCE connect/status, refresh-token renewal, and real post endpoint (requires configured X app and granted access)\n- Agent manual run performs real read-only X recent-search discovery for enabled account/hashtag targets, deduplicates results, and records discovery logs; it does not simulate success
 
 ## Not yet included / requires additional product decisions and credentials
 - On-chain wallet signature verification (SIWE / chain-specific nonce verification) and transaction execution
 - Automatic airdrop eligibility discovery, scraping, or claim automation (must be implemented per project using official APIs/contracts; no universal safe API)
-- X timeline search, replies, likes, reposts, analytics and background scheduling (requires approved endpoints/scopes and API access; currently posting is implemented)
+- Automatic likes, reposts, and replies (discovery is read-only; each action needs a separate consent-aware implementation, endpoint checks, limits, and audit trail)\n- Scheduled agent discovery execution (GitHub Actions currently reaches the scheduler heartbeat; it does not yet run discovery for users in the background)
 - AI agent orchestration (requires provider API keys, model choices, limits, and task definitions)
 - Email delivery provider, password reset, email verification, MFA
 - Admin console / RBAC management and billing
@@ -60,4 +60,4 @@ A GitHub Actions workflow `.github/workflows/agent-scheduler.yml` runs every 15 
    - `AIRDROPNEXUS_SCHEDULER_SECRET`: the same value as server `SCHEDULER_SECRET`
 3. Run **Actions → Agent Scheduler → Run workflow** to verify connectivity.
 
-The endpoint `POST /api/internal/scheduler/run` is protected by a constant-time bearer-secret check. Currently it is a heartbeat/eligibility endpoint only and explicitly executes zero actions. Real X automation remains disabled until API discovery, token refresh, consent checks, and per-action permission verification are implemented. GitHub Actions free-tier limits and schedule delays apply; this is not guaranteed 24/7 hosting.
+The endpoint `POST /api/internal/scheduler/run` is protected by a constant-time bearer-secret check. Currently it is a heartbeat/eligibility endpoint only and explicitly executes zero actions. The scheduler currently remains a heartbeat and does not launch user agent discovery. Manual discovery is available through `/api/agents/run`; it is read-only and does not execute likes, reposts, or replies. GitHub Actions free-tier limits and schedule delays apply; this is not guaranteed 24/7 hosting.
