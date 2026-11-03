@@ -69,6 +69,22 @@ app.get('/api/x/connect',requireAuth,(req,res)=>{if(!process.env.X_CLIENT_ID||!p
 app.get('/api/x/callback',requireAuth,asyncRoute(async(req,res)=>{const {code,state,error}=req.query,stored=req.session.xpkce;if(error||!code||!stored||state!==stored.state)return res.redirect('/?x=connect_failed');const body=new URLSearchParams({grant_type:'authorization_code',code,redirect_uri:process.env.X_CALLBACK_URL,code_verifier:stored.verifier});const tokenHeaders={'Content-Type':'application/x-www-form-urlencoded'};if(process.env.X_CLIENT_SECRET)tokenHeaders.Authorization='Basic '+Buffer.from(process.env.X_CLIENT_ID+':'+process.env.X_CLIENT_SECRET).toString('base64');else body.set('client_id',process.env.X_CLIENT_ID);const token=await fetch('https://api.twitter.com/2/oauth2/token',{method:'POST',headers:tokenHeaders,body});const td=await token.json();if(!token.ok)return res.status(502).send('X token exchange failed: '+JSON.stringify(td));const me=await fetch('https://api.twitter.com/2/users/me',{headers:{Authorization:`Bearer ${td.access_token}`}});const md=await me.json();const expiry=new Date(Date.now()+(td.expires_in||7200)*1000);await query('INSERT INTO x_oauth_tokens(user_id,access_token,refresh_token,expires_at,x_user_id,x_username) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(user_id) DO UPDATE SET access_token=$2,refresh_token=COALESCE($3,x_oauth_tokens.refresh_token),expires_at=$4,x_user_id=$5,x_username=$6,updated_at=now()',[req.session.user.id,td.access_token,td.refresh_token||null,expiry,md.data?.id||null,md.data?.username||null]);delete req.session.xpkce;await logActivity(req.session.user.id,'x_account_connected',{username:md.data?.username});res.redirect('/?x=connected');}));
 app.get('/api/x/status',requireAuth,asyncRoute(async(req,res)=>{const r=await query('SELECT x_username,expires_at FROM x_oauth_tokens WHERE user_id=$1',[req.session.user.id]);res.json({connected:!!r.rowCount,username:r.rows[0]?.x_username||null,expiresAt:r.rows[0]?.expires_at||null});}));
 app.post('/api/x/post',requireAuth,asyncRoute(async(req,res)=>{const b=z.object({text:z.string().min(1).max(280)}).parse(req.body);let accessToken;try{accessToken=await getValidXAccessToken(req.session.user.id);}catch(e){return res.status(e.status||502).json({error:e.message,code:e.code||'X_TOKEN_ERROR'});}const api=await fetch('https://api.twitter.com/2/tweets',{method:'POST',headers:{Authorization:`Bearer ${accessToken}`,'Content-Type':'application/json'},body:JSON.stringify({text:b.text})});const data=await api.json();if(!api.ok)return res.status(api.status).json({error:'X API rejected the post',details:data});await logActivity(req.session.user.id,'x_post_created',{tweetId:data.data?.id});res.status(201).json({tweet:data.data});}));
+// X API transient-failure handling: bounded retries for 429 and 5xx responses.
+async function fetchXWithRetry(url,options={},maxRetries=2){
+ let lastResponse;
+ for(let attempt=0;attempt<=maxRetries;attempt++){
+  const response=await fetch(url,options);
+  if(response.status!==429&&response.status<500)return response;
+  lastResponse=response;
+  if(attempt===maxRetries)break;
+  const retryHeader=Number(response.headers.get('retry-after'));
+  const exponential=Math.min(15000,1000*Math(2**attempt));
+  const waitMs=response.status===429&&Number.isFinite(retryHeader)&&retryHeader>0
+    ?Math.min(30000,retryHeader*1000):exponential;
+  await new Promise(resolve=>setTimeout(resolve,waitMs));
+ }
+ return lastResponse;
+}
 // ---------- Agent chain detection ----------
 const CHAIN_KEYWORDS = {
   Solana: ['solana', '$sol', 'sol ', ' jupiter', 'phantom', 'solan'],
@@ -181,7 +197,7 @@ async function runAgentsForUser(uid){
    url.searchParams.set('query',item.query+' -is:retweet -is:reply');
    url.searchParams.set('max_results','10');
    url.searchParams.set('tweet.fields','created_at,author_id,public_metrics');
-   const api=await fetch(url,{headers:{Authorization:'Bearer '+accessToken}});
+   const api=await fetchXWithRetry(url,{headers:{Authorization:'Bearer '+accessToken}},2);
    const data=await api.json().catch(()=>({}));
    if(!api.ok){errors.push({target:item.query,status:api.status,message:data.detail||data.title||'X search failed'});continue;}
    for(const tweet of (data.data||[]))if(tweet.author_id!==selfId)discovered.push({id:tweet.id,text:tweet.text,authorId:tweet.author_id,createdAt:tweet.created_at,metrics:tweet.public_metrics||{},target:item.query});
@@ -203,7 +219,7 @@ async function runAgentsForUser(uid){
    if(action==='like'){endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/likes';body={tweet_id:tweet.id};}
    else{endpoint='https://api.x.com/2/users/'+encodeURIComponent(selfId)+'/retweets';body={tweet_id:tweet.id};}
    try{
-    const api=await fetch(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const api=await fetchXWithRetry(endpoint,{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify(body)},2);
     const data=await api.json().catch(()=>({}));
     if(api.ok){
      await query("INSERT INTO agent_executions(user_id,action,target_post_id,target_account,chain,status,message) VALUES($1,$2,$3,$4,$5,'success',$6)",[uid,action,tweet.id,String(tweet.authorId),detectChain(tweet.text),tweet.target,'Confirmed by X API']);
