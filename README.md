@@ -51,3 +51,13 @@ No credentials are embedded. Features that require external access are intention
 - Passwords are bcrypt-hashed (cost 12); sessions are server-side and stored in PostgreSQL.
 - API routes validate payloads and apply basic rate limiting.
 - The app is not a substitute for a security review. Do not use production wallets or tokens until HTTPS, token encryption, backup, monitoring, refresh handling, and security review are completed.
+
+## Free scheduled agent heartbeat
+A GitHub Actions workflow `.github/workflows/agent-scheduler.yml` runs every 15 minutes (UTC) and can also be started manually. To connect it to a deployed server:
+1. Set server environment variable `SCHEDULER_SECRET` to a cryptographically random value of at least 32 characters.
+2. In GitHub repository **Settings → Secrets and variables → Actions**, add:
+   - `AIRDROPNEXUS_APP_URL`: your deployed HTTPS base URL (no trailing slash required)
+   - `AIRDROPNEXUS_SCHEDULER_SECRET`: the same value as server `SCHEDULER_SECRET`
+3. Run **Actions → Agent Scheduler → Run workflow** to verify connectivity.
+
+The endpoint `POST /api/internal/scheduler/run` is protected by a constant-time bearer-secret check. Currently it is a heartbeat/eligibility endpoint only and explicitly executes zero actions. Real X automation remains disabled until API discovery, token refresh, consent checks, and per-action permission verification are implemented. GitHub Actions free-tier limits and schedule delays apply; this is not guaranteed 24/7 hosting.
