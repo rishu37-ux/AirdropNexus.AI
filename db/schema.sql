@@ -38,8 +38,8 @@ CREATE INDEX IF NOT EXISTS index_session_on_expire ON session(expire);
 CREATE TABLE IF NOT EXISTS agent_configs (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   enabled BOOLEAN NOT NULL DEFAULT false,
-  auto_like BOOLEAN NOT NULL DEFAULT true,
-  auto_repost BOOLEAN NOT NULL DEFAULT true,
+  auto_like BOOLEAN NOT NULL DEFAULT false,
+  auto_repost BOOLEAN NOT NULL DEFAULT false,
   auto_reply BOOLEAN NOT NULL DEFAULT false,
   min_delay_sec INTEGER NOT NULL DEFAULT 25,
   max_delay_sec INTEGER NOT NULL DEFAULT 65,
