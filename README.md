@@ -35,12 +35,12 @@ In the X Developer Portal, configure OAuth 2.0 Authorization Code with PKCE and 
 - Wallet address book (create/list/delete, per-user data isolation)
 - Campaign tracker (create/list/update status/delete)
 - Activity log
-- X OAuth PKCE connect/status, refresh-token renewal, and real post endpoint (requires configured X app and granted access)\n- Agent manual run performs real read-only X recent-search discovery for enabled account/hashtag targets, deduplicates results, and records discovery logs; it does not simulate success
+- X OAuth PKCE connect/status, refresh-token renewal, and real post endpoint (requires configured X app and granted access)\n- Agent manual run performs real X recent-search discovery and, only when explicitly enabled in saved settings, executes Like/Repost via official X API endpoints; successful actions are verified and logged, with duplicate protection and hourly caps
 
 ## Not yet included / requires additional product decisions and credentials
 - On-chain wallet signature verification (SIWE / chain-specific nonce verification) and transaction execution
 - Automatic airdrop eligibility discovery, scraping, or claim automation (must be implemented per project using official APIs/contracts; no universal safe API)
-- Automatic likes, reposts, and replies (discovery is read-only; each action needs a separate consent-aware implementation, endpoint checks, limits, and audit trail)\n- Scheduled agent discovery execution (GitHub Actions currently reaches the scheduler heartbeat; it does not yet run discovery for users in the background)
+- Auto-replies (disabled until reply generation, moderation/approval, and safety controls are implemented). Like/Repost require X API permission/tier, are off by default, and are subject to user-configured limits\n- Scheduled agent discovery execution (GitHub Actions currently reaches the scheduler heartbeat; it does not yet run discovery for users in the background)
 - AI agent orchestration (requires provider API keys, model choices, limits, and task definitions)
 - Email delivery provider, password reset, email verification, MFA
 - Admin console / RBAC management and billing
@@ -60,4 +60,4 @@ A GitHub Actions workflow `.github/workflows/agent-scheduler.yml` runs every 15 
    - `AIRDROPNEXUS_SCHEDULER_SECRET`: the same value as server `SCHEDULER_SECRET`
 3. Run **Actions → Agent Scheduler → Run workflow** to verify connectivity.
 
-The endpoint `POST /api/internal/scheduler/run` is protected by a constant-time bearer-secret check. Currently it is a heartbeat/eligibility endpoint only and explicitly executes zero actions. The scheduler currently remains a heartbeat and does not launch user agent discovery. Manual discovery is available through `/api/agents/run`; it is read-only and does not execute likes, reposts, or replies. GitHub Actions free-tier limits and schedule delays apply; this is not guaranteed 24/7 hosting.
+The endpoint `POST /api/internal/scheduler/run` is protected by a constant-time bearer-secret check. Currently it is a heartbeat/eligibility endpoint only and explicitly executes zero actions. The scheduler currently remains a heartbeat and does not launch user agent discovery. Manual `/api/agents/run` can perform configured Like/Repost actions; auto-reply remains unavailable. Existing agent settings should be reviewed after upgrade; new settings default Like/Repost off. GitHub Actions free-tier limits and schedule delays apply; this is not guaranteed 24/7 hosting.
