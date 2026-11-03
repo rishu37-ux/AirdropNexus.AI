@@ -30,8 +30,19 @@ app.use(
   })
 );
 
-// ---------- CORS ----------
-app.use(cors({ origin: true, credentials: true }));
+// ---------- CORS (explicit allowlist) ----------
+const allowedOrigins = new Set([config.appUrl].filter(Boolean));
+if (config.env !== 'production') {
+  allowedOrigins.add('http://localhost:3000');
+  allowedOrigins.add('http://127.0.0.1:3000');
+}
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed by CORS'));
+  },
+  credentials: true,
+}));
 
 // ---------- Body parsing ----------
 app.use(express.json({ limit: '1mb' }));
@@ -78,7 +89,7 @@ const authLimiter = rateLimit({
   max: 20,
   message: { error: 'Too many auth attempts, please try again later.' },
 });
-app.use('/auth/', authLimiter);
+app.use('/api/auth/', authLimiter);
 
 // ---------- Static frontend ----------
 app.use(express.static(path.resolve(__dirname, '../public')));
@@ -93,6 +104,27 @@ app.get('/health', (req, res) => {
     workerEnabled: config.worker.enabled,
     timestamp: new Date().toISOString(),
   });
+});
+
+// ---------- API authentication + CSRF origin guard ----------
+const publicApiPaths = new Set([
+  '/api/auth/status',
+  '/api/auth/demo-login',
+  '/api/auth/x/callback',
+  '/api/health',
+]);
+app.use('/api', (req, res, next) => {
+  if (publicApiPaths.has(req.path)) return next();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.get('origin');
+    if (origin && !allowedOrigins.has(origin)) {
+      return res.status(403).json({ error: 'Request origin is not allowed' });
+    }
+  }
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  next();
 });
 
 // ---------- API routes ----------
