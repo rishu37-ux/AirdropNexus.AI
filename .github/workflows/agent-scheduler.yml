@@ -5,12 +5,6 @@ on:
     # GitHub scheduled workflows run on UTC. Every 15 minutes.
     - cron: "*/15 * * * *"
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Heartbeat only (agent engine is not yet enabled)"
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -20,13 +14,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scheduler-heartbeat:
+  scheduler:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
-      - name: Scheduler heartbeat
+      - name: Check deployment secrets
+        id: config
+        env:
+          APP_URL: ${{ secrets.AIRDROPNEXUS_APP_URL }}
+          SCHEDULER_SECRET: ${{ secrets.AIRDROPNEXUS_SCHEDULER_SECRET }}
         run: |
-          echo "AirDropNexus scheduler fired at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          echo "This is a timer heartbeat only."
-          echo "Real agent execution remains fail-closed until the X discovery/action engine and secure server scheduler endpoint are implemented."
-          echo "No X actions were executed; no simulated successes were recorded."
+          if [ -n "$APP_URL" ] && [ -n "$SCHEDULER_SECRET" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Set repository Actions secrets AIRDROPNEXUS_APP_URL and AIRDROPNEXUS_SCHEDULER_SECRET to connect the timer to the backend."
+          fi
+
+      - name: Send scheduler heartbeat to backend
+        if: steps.config.outputs.configured == 'true'
+        env:
+          APP_URL: ${{ secrets.AIRDROPNEXUS_APP_URL }}
+          SCHEDULER_SECRET: ${{ secrets.AIRDROPNEXUS_SCHEDULER_SECRET }}
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error             --max-time 20             --request POST             --header "Authorization: Bearer $SCHEDULER_SECRET"             --header "Content-Type: application/json"             --data '{}'             "${APP_URL%/}/api/internal/scheduler/run")"
+          echo "$response"
