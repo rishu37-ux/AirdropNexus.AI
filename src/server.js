@@ -134,6 +134,22 @@ app.delete('/api/agents/targets/:id',requireAuth,asyncRoute(async(req,res)=>{
   if(!r.rowCount)return res.status(404).json({error:'Target not found'});
   res.json({ok:true});
 }));
+app.get('/api/agents/monitoring',requireAuth,asyncRoute(async(req,res)=>{
+ const uid=req.session.user.id;
+ const [cfg,totals,recent]=await Promise.all([
+  query('SELECT enabled,auto_like,auto_repost,auto_reply,max_per_hour FROM agent_configs WHERE user_id=$1',[uid]),
+  query("SELECT count(*) FILTER(WHERE status='success')::int AS succeeded,count(*) FILTER(WHERE status='failed')::int AS failed,count(*) FILTER(WHERE status='discovered')::int AS discovered,count(*) FILTER(WHERE created_at>now()-interval '24 hours' AND status='success' AND action IN ('like','repost'))::int AS actions_24h,max(created_at) AS last_activity FROM agent_executions WHERE user_id=$1",[uid]),
+  query('SELECT action,status,message,created_at,target_post_id FROM agent_executions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 8',[uid])
+ ]);
+ const c=cfg.rows[0]||{},t=totals.rows[0];
+ res.json({enabled:!!c.enabled,actions:{like:!!c.auto_like,repost:!!c.auto_repost,reply:!!c.auto_reply},maxPerHour:Number(c.max_per_hour||20),metrics:{succeeded:t.succeeded,failed:t.failed,discovered:t.discovered,actions24h:Number(t.actions_24h),lastActivity:t.last_activity},recent:recent.rows});
+}));
+app.post('/api/agents/control',requireAuth,asyncRoute(async(req,res)=>{
+ const b=z.object({enabled:z.boolean()}).parse(req.body);
+ const r=await query('INSERT INTO agent_configs(user_id,enabled) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET enabled=$2,updated_at=now() RETURNING enabled',[req.session.user.id,b.enabled]);
+ await logActivity(req.session.user.id,b.enabled?'agents_resumed':'agents_paused');
+ res.json({enabled:r.rows[0].enabled});
+}));
 app.get('/api/agents/logs',requireAuth,asyncRoute(async(req,res)=>{
   const r=await query('SELECT * FROM agent_executions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100',[req.session.user.id]);
   res.json({logs:r.rows});
